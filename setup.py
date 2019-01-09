@@ -28,7 +28,7 @@ from distutils.command import install_data, sdist, config, build
 
 NAME = 'Orange3'
 
-VERSION = '3.19.0'
+VERSION = '3.20.0'
 ISRELEASED = False
 # full version identifier including a git revision identifier for development
 # build/releases (this is filled/updated in `write_version_py`)
