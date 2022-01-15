@@ -1,22 +1,25 @@
+# pylint: disable=unsubscriptable-object
+import unittest
 from unittest import TestCase
 from unittest.mock import Mock
 
+import numpy as np
 from AnyQt.QtCore import QMimeData, QPoint, Qt
 from AnyQt.QtGui import QDragEnterEvent
 
+
 from Orange.data import Table, ContinuousVariable, DiscreteVariable, Domain
-from Orange.widgets.data.contexthandlers import \
-    SelectAttributesDomainContextHandler
 from Orange.widgets.settings import ContextSetting
 from Orange.widgets.utils import vartype
 from Orange.widgets.tests.base import WidgetTest
 from Orange.widgets.data.owselectcolumns \
-    import OWSelectAttributes, VariablesListItemModel
+    import OWSelectAttributes, VariablesListItemModel, \
+    SelectAttributesDomainContextHandler
 from Orange.widgets.data.owrank import OWRank
 from Orange.widgets.widget import AttributeList
 
-Continuous = vartype(ContinuousVariable())
-Discrete = vartype(DiscreteVariable())
+Continuous = vartype(ContinuousVariable("c"))
+Discrete = vartype(DiscreteVariable("d"))
 
 
 class TestSelectAttributesDomainContextHandler(TestCase):
@@ -34,7 +37,7 @@ class TestSelectAttributesDomainContextHandler(TestCase):
                       'd2': Discrete, 'd3': Discrete},
                      {'c2': Continuous, 'd4': Discrete, })
 
-        self.handler = SelectAttributesDomainContextHandler()
+        self.handler = SelectAttributesDomainContextHandler(first_match=False)
         self.handler.read_defaults = lambda: None
 
     def test_open_context(self):
@@ -54,17 +57,22 @@ class TestSelectAttributesDomainContextHandler(TestCase):
 
         widget = SimpleWidget()
         self.handler.initialize(widget)
-        self.handler.open_context(widget, self.args[0])
+        domain = self.args[0]
+        self.handler.open_context(widget, domain)
         self.assertEqual(widget.domain_role_hints,
-                         {('d1', Discrete): ('available', 0),
-                          ('d2', Discrete): ('meta', 0),
-                          ('c1', Continuous): ('attribute', 0),
-                          ('d3', Discrete): ('attribute', 1),
-                          ('d4', Discrete): ('attribute', 2),
-                          ('c2', Continuous): ('class', 0)})
+                         {domain['d1']: ('available', 0),
+                          domain['d2']: ('meta', 0),
+                          domain['c1']: ('attribute', 0),
+                          domain['d3']: ('attribute', 1),
+                          domain['d4']: ('attribute', 2),
+                          domain['c2']: ('class', 0)})
 
     def test_open_context_with_imperfect_match(self):
         self.handler.bind(SimpleWidget)
+        context1 = Mock(values=dict(
+            domain_role_hints=({('d1', Discrete): ('attribute', 0),
+                                ('m2', Discrete): ('meta', 0)}, -2)
+        ))
         context = Mock(values=dict(
             domain_role_hints=({('d1', Discrete): ('available', 0),
                                 ('d2', Discrete): ('meta', 0),
@@ -74,34 +82,18 @@ class TestSelectAttributesDomainContextHandler(TestCase):
                                 ('c2', Continuous): ('class', 0)}, -2)
         ))
         self.handler.global_contexts = \
-            [Mock(values={}), context, Mock(values={})]
+            [Mock(values={}), context1, context, Mock(values={})]
 
         widget = SimpleWidget()
         self.handler.initialize(widget)
-        self.handler.open_context(widget, self.args[0])
+        domain = self.args[0]
+        self.handler.open_context(widget, domain)
 
         self.assertEqual(widget.domain_role_hints,
-                         {('d1', Discrete): ('available', 0),
-                          ('d2', Discrete): ('meta', 0),
-                          ('c1', Continuous): ('attribute', 0),
-                          ('c2', Continuous): ('class', 0)})
-
-    def test_open_context_with_no_match(self):
-        self.handler.bind(SimpleWidget)
-        context = Mock(values=dict(
-            domain_role_hints=({('d1', Discrete): ('available', 0),
-                                ('d2', Discrete): ('meta', 0),
-                                ('c1', Continuous): ('attribute', 0),
-                                ('d3', Discrete): ('attribute', 1),
-                                ('d4', Discrete): ('attribute', 2),
-                                ('c2', Continuous): ('class', 0)}, -2),
-            required=('g1', Continuous),
-        ))
-        self.handler.global_contexts = [context]
-        widget = SimpleWidget()
-        self.handler.initialize(widget)
-        self.handler.open_context(widget, self.args[0])
-        self.assertEqual(widget.domain_role_hints, {})
+                         {domain['d1']: ('available', 0),
+                          domain['d2']: ('meta', 0),
+                          domain['c1']: ('attribute', 0),
+                          domain['c2']: ('class', 0)})
 
 
 class TestModel(TestCase):
@@ -117,7 +109,6 @@ class TestModel(TestCase):
 
     def test_flags(self):
         m = VariablesListItemModel([ContinuousVariable("X")])
-        index = m.index(0)
         flags = m.flags(m.index(0))
         self.assertTrue(flags & Qt.ItemIsDragEnabled)
         self.assertFalse(flags & Qt.ItemIsDropEnabled)
@@ -154,9 +145,7 @@ class TestOWSelectAttributes(WidgetTest):
         self.assertEqual(control.button.isEnabled(), button)
         self.assertEqual(control.isVisibleTo(widget), box)
         self.assertEqual(widget.used_attrs_view.isEnabled(), _list)
-        self.assertEqual(widget.up_attr_button.isEnabled(), _list)
         self.assertEqual(widget.move_attr_button.isEnabled(), _list)
-        self.assertEqual(widget.down_attr_button.isEnabled(), _list)
         if button:
             control.button.click()
             self.assertEqual(control.button.isEnabled(), False)
@@ -359,7 +348,130 @@ class TestOWSelectAttributes(WidgetTest):
         self.assertFalse(event.isAccepted())
 
     def _drag_enter_event(self, variables):
+        # pylint: disable=attribute-defined-outside-init
         self.event_data = mime = QMimeData()
         mime.setProperty("_items", variables)
         return QDragEnterEvent(QPoint(0, 0), Qt.MoveAction, mime,
                                Qt.NoButton, Qt.NoModifier)
+
+    def test_move_rows(self):
+        data = Table("iris")[:5]
+        w = self.widget
+        self.send_signal(w.Inputs.data, data)
+        view = w.used_attrs_view
+        model = view.model()
+        selmodel = view.selectionModel()
+        midx = model.index(1, 0)
+        selmodel.select(midx, selmodel.ClearAndSelect)
+
+        w.move_up(view)
+        d1 = self.get_output(w.Outputs.data, w)
+        self.assertEqual(
+            d1.domain.attributes,
+            data.domain.attributes[:2][::-1] + data.domain.attributes[2:]
+        )
+        w.move_down(view)
+        d1 = self.get_output(w.Outputs.data, w)
+        self.assertEqual(
+            d1.domain.attributes,
+            data.domain.attributes
+        )
+
+    def test_domain_new_feature(self):
+        """ Test scenario when new attribute is added at position 0 """
+        data = Table("iris")
+        self.send_signal(self.widget.Inputs.data, data)
+
+        data1 = Table(
+            Domain(
+                (ContinuousVariable("a"),) + data.domain.attributes,
+                data.domain.class_var),
+            np.hstack((np.ones((len(data), 1)), data.X)),
+            data.Y
+        )
+        self.send_signal(self.widget.Inputs.data, data1)
+
+    def test_select_new_features(self):
+        """
+        When ignore_new_features unchecked new attributes must appear in one of
+        selected columns. Test with fist make context remember attributes of
+        reduced domain and then testing with full domain. Features in missing
+        in reduced domain must appears as seleceted.
+        """
+        data = Table("iris")
+        domain = data.domain
+
+        # data with one feature missing
+        new_domain = Domain(
+            domain.attributes[:-1], domain.class_var, domain.metas
+        )
+        new_data = Table.from_table(new_domain, data)
+
+        # make context remember features in reduced domain
+        self.send_signal(self.widget.Inputs.data, new_data)
+        output = self.get_output(self.widget.Outputs.data)
+
+        self.assertTupleEqual(
+            new_data.domain.attributes, output.domain.attributes
+        )
+        self.assertTupleEqual(new_data.domain.metas, output.domain.metas)
+        self.assertEqual(new_data.domain.class_var, output.domain.class_var)
+
+        # send full domain
+        self.send_signal(self.widget.Inputs.data, data)
+        output = self.get_output(self.widget.Outputs.data)
+
+        # if select_new_features checked all new features goes in the selected
+        # features columns - domain equal original
+        self.assertFalse(self.widget.ignore_new_features)
+        self.assertTupleEqual(data.domain.attributes, output.domain.attributes)
+        self.assertTupleEqual(data.domain.metas, output.domain.metas)
+        self.assertEqual(data.domain.class_var, output.domain.class_var)
+
+    def test_unselect_new_features(self):
+        """
+        When ignore_new_features checked new attributes must appear in one
+        available attributes column. Test with fist make context remember
+        attributes of reduced domain and then testing with full domain.
+        Features in missing in reduced domain must appears as not seleceted.
+        """
+        data = Table("iris")
+        domain = data.domain
+
+        # data with one feature missing
+        new_domain = Domain(
+            domain.attributes[:-1], domain.class_var, domain.metas
+        )
+        new_data = Table.from_table(new_domain, data)
+
+        # make context remember features in reduced domain
+        self.send_signal(self.widget.Inputs.data, new_data)
+        # select ignore_new_features
+        self.widget.controls.ignore_new_features.click()
+        self.assertTrue(self.widget.ignore_new_features)
+        output = self.get_output(self.widget.Outputs.data)
+
+        self.assertTupleEqual(
+            new_data.domain.attributes, output.domain.attributes
+        )
+        self.assertTupleEqual(new_data.domain.metas, output.domain.metas)
+        self.assertEqual(new_data.domain.class_var, output.domain.class_var)
+
+        # send full domain
+        self.send_signal(self.widget.Inputs.data, data)
+        output = self.get_output(self.widget.Outputs.data)
+
+        # if ignore_new_features checked all new features goes in the
+        # available attributes column
+        self.assertTrue(self.widget.ignore_new_features)
+        self.assertTupleEqual(new_domain.attributes, output.domain.attributes)
+        self.assertTupleEqual(new_domain.metas, output.domain.metas)
+        self.assertEqual(new_domain.class_var, output.domain.class_var)
+        # test if new attribute was added to unselected attributes
+        self.assertEqual(
+            domain.attributes[-1], list(self.widget.available_attrs)[0]
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

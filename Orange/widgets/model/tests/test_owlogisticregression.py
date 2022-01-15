@@ -12,6 +12,7 @@ from Orange.widgets.model.owlogisticregression import (create_coef_table,
 from Orange.widgets.tests.base import (WidgetTest, WidgetLearnerTestMixin,
                                        ParameterMapping)
 
+
 class LogisticRegressionTest(unittest.TestCase):
     def test_coef_table_single(self):
         data = Table("titanic")
@@ -67,9 +68,9 @@ class TestOWLogisticRegression(WidgetTest, WidgetLearnerTestMixin):
         GH-2116
         """
         table = Table("iris")
-        cases = [[list(range(80))],
-                 [list(range(90, 140))],
-                 [list(range(30)) + list(range(120, 140))]]
+        cases = [slice(80), slice(90, 140),
+                 np.hstack((np.arange(30, dtype=int),
+                            np.arange(120, 140, dtype=int)))]
         for case in cases:
             data = table[case, :]
             self.send_signal("Data", data)
@@ -81,11 +82,11 @@ class TestOWLogisticRegression(WidgetTest, WidgetLearnerTestMixin):
         Instead of writing "coef" or sth similar it is written a second value name.
         GH-2116
         """
-        table = Table(
+        table = Table.from_list(
             Domain(
                 [ContinuousVariable("a"),
                  ContinuousVariable("b")],
-                [DiscreteVariable("c", values=["yes", "no"])]
+                [DiscreteVariable("c", values=("yes", "no"))]
             ),
             list(zip(
                 [1., 0.],
@@ -104,10 +105,21 @@ class TestOWLogisticRegression(WidgetTest, WidgetLearnerTestMixin):
         GH-2392
         """
         table = Table("iris")
-        table.Y[:5] = np.NaN
+        with table.unlocked():
+            table.Y[:5] = np.NaN
         self.send_signal("Data", table)
         coef1 = self.get_output("Coefficients")
         table = table[5:]
         self.send_signal("Data", table)
         coef2 = self.get_output("Coefficients")
         self.assertTrue(np.array_equal(coef1, coef2))
+
+    def test_class_weights(self):
+        table = Table("iris")
+        self.send_signal("Data", table)
+        self.assertFalse(self.widget.class_weight)
+        self.widget.controls.class_weight.setChecked(True)
+        self.assertTrue(self.widget.class_weight)
+        self.widget.apply_button.button.click()
+        self.assertEqual(self.widget.model.skl_model.class_weight, "balanced")
+        self.assertTrue(self.widget.Warning.class_weights_used.is_shown())

@@ -14,6 +14,7 @@ from Orange.widgets import gui
 class OWRandomize(OWWidget):
     name = "Randomize"
     description = "Randomize features, class and/or metas in data table."
+    category = "Transform"
     icon = "icons/Random.svg"
     priority = 2100
     keywords = []
@@ -31,7 +32,7 @@ class OWRandomize(OWWidget):
     shuffle_attrs = Setting(False)
     shuffle_metas = Setting(False)
     scope_prop = Setting(80)
-    random_seed = Setting(0)
+    random_seed = Setting(False)
     auto_apply = Setting(True)
 
     def __init__(self):
@@ -62,25 +63,22 @@ class OWRandomize(OWWidget):
             box, "", alignment=Qt.AlignCenter,
             sizePolicy=(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed))
         self._set_scope_label()
-        gui.separator(box, 10, 10)
         self.replicable_check = gui.checkBox(
             box, self, "random_seed", "Replicable shuffling",
             callback=self._shuffle_check_changed)
 
-        self.apply_button = gui.auto_commit(
-            self.controlArea, self, "auto_apply", "&Apply",
-            box=False, commit=self.apply)
+        gui.auto_apply(self.buttonsArea, self)
 
     @property
     def parts(self):
         return [self.shuffle_class, self.shuffle_attrs, self.shuffle_metas]
 
     def _shuffle_check_changed(self):
-        self.apply()
+        self.commit.deferred()
 
     def _scope_slider_changed(self):
         self._set_scope_label()
-        self.apply()
+        self.commit.deferred()
 
     def _set_scope_label(self):
         self.scope_label.setText("{}%".format(self.scope_prop))
@@ -88,9 +86,10 @@ class OWRandomize(OWWidget):
     @Inputs.data
     def set_data(self, data):
         self.data = data
-        self.apply()
+        self.commit.now()
 
-    def apply(self):
+    @gui.deferred
+    def commit(self):
         data = None
         if self.data:
             rand_seed = self.random_seed or None
@@ -100,8 +99,9 @@ class OWRandomize(OWWidget):
             type_ = sum(t for t, p in zip(Randomize.Type, self.parts) if p)
             randomized = Randomize(type_, rand_seed)(self.data[indices])
             data = self.data.copy()
-            for i, instance in zip(indices, randomized):
-                data[i] = instance
+            with data.unlocked():
+                for i, instance in zip(indices, randomized):
+                    data[i] = instance
         self.Outputs.data.send(data)
 
     def send_report(self):
@@ -113,7 +113,7 @@ class OWRandomize(OWWidget):
             "Settings",
             [("Shuffled columns", text),
              ("Proportion of shuffled rows", "{}%".format(self.scope_prop)),
-             ("Replicable", ["no", "yes"][self.random_seed])])
+             ("Replicable", "yes" if self.random_seed else "no")])
 
 
 if __name__ == "__main__":  # pragma: no cover

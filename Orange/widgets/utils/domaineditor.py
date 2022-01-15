@@ -1,14 +1,17 @@
 from itertools import chain
+from copy import deepcopy
 
 import numpy as np
 import scipy.sparse as sp
 
 from AnyQt.QtCore import Qt, QAbstractTableModel
-from AnyQt.QtGui import QColor
+from AnyQt.QtGui import QColor, QFont
 from AnyQt.QtWidgets import QComboBox, QTableView, QSizePolicy
 
 from Orange.data import DiscreteVariable, ContinuousVariable, StringVariable, \
     TimeVariable, Domain
+from Orange.misc.collections import natural_sorted
+from Orange.data.util import get_unique_names_duplicates
 from Orange.statistics.util import unique
 from Orange.widgets import gui
 from Orange.widgets.gui import HorizontalGridDelegate
@@ -43,6 +46,14 @@ class VarTableModel(QAbstractTableModel):
     def __init__(self, variables, *args):
         super().__init__(*args)
         self.variables = variables
+        self.orig_variables = None
+        self.set_orig_variables(variables)
+
+    def set_orig_variables(self, variables):
+        self.orig_variables = deepcopy(variables)
+
+    def reset_variables(self):
+        self.set_variables(deepcopy(self.orig_variables))
 
     def set_variables(self, variables):
         self.modelAboutToBeReset.emit()
@@ -52,13 +63,14 @@ class VarTableModel(QAbstractTableModel):
     def rowCount(self, parent):
         return 0 if parent.isValid() else len(self.variables)
 
-    def columnCount(self, parent):
+    @staticmethod
+    def columnCount(parent):
         return 0 if parent.isValid() else Column.not_valid
 
     def data(self, index, role):
         row, col = index.row(), index.column()
         val = self.variables[row][col]
-        if role == Qt.DisplayRole or role == Qt.EditRole:
+        if role in (Qt.DisplayRole, Qt.EditRole):
             if col == Column.tpe:
                 return self.type2name[val]
             if col == Column.place:
@@ -76,8 +88,14 @@ class VarTableModel(QAbstractTableModel):
             place = self.variables[row][Column.place]
             mapping = [Place.meta, Place.feature, Place.class_var, None]
             return TableModel.ColorForRole.get(mapping[place], None)
+        if role == Qt.FontRole:
+            if self.variables[row] != self.orig_variables[row]:
+                font = QFont()
+                font.setBold(True)
+                return font
+        return None
 
-    def setData(self, index, value, role):
+    def setData(self, index, value, role=Qt.EditRole):
         row, col = index.row(), index.column()
         row_data = self.variables[row]
         if role == Qt.EditRole:
@@ -96,6 +114,7 @@ class VarTableModel(QAbstractTableModel):
             # Settings may change background colors
             self.dataChanged.emit(index.sibling(row, 0), index.sibling(row, 3))
             return True
+        return False
 
     def headerData(self, i, orientation, role=Qt.DisplayRole):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole and i < 4:
@@ -116,7 +135,7 @@ class ComboDelegate(HorizontalGridDelegate):
         self.view = view
         self.items = items
 
-    def createEditor(self, parent, option, index):
+    def createEditor(self, parent, _option, index):
         # This ugly hack closes the combo when the user selects an item
         class Combo(QComboBox):
             def __init__(self, *args):
@@ -131,6 +150,8 @@ class ComboDelegate(HorizontalGridDelegate):
                 super().showPopup(*args)
                 self.popup_shown = True
 
+            # Here, we need `self` from the closure
+            # pylint: disable=no-self-argument,attribute-defined-outside-init
             def hidePopup(me):
                 if me.popup_shown:
                     self.view.model().setData(
@@ -158,6 +179,7 @@ class VarTypeDelegate(ComboDelegate):
         ind = items.index(index.data())
         combo.addItems(items)
         combo.setCurrentIndex(ind)
+        combo.showPopup()
 
 
 class PlaceDelegate(ComboDelegate):
@@ -167,6 +189,7 @@ class PlaceDelegate(ComboDelegate):
             index.row()][Column.tpe].is_primitive()
         combo.addItems(self.items[2 * to_meta:])
         combo.setCurrentIndex(self.items.index(index.data()) - 2 * to_meta)
+        combo.showPopup()
 
 
 class DomainEditor(QTableView):
@@ -236,21 +259,27 @@ class DomainEditor(QTableView):
         sparse_cols = [c if sp.issparse(c) else sp.csc_matrix(c) for c in cols]
         return sp.hstack(sparse_cols).tocsr()
 
-    def get_domain(self, domain, data):
-        """Create domain (and dataset) from changes made in the widget.
-
-        Parameters
-        ----------
-        domain : old domain
-        data : source data
+    def get_domain(self, domain, data, deduplicate=False):
+        """
+        Create domain (and dataset) from changes made in the widget.
 
         Returns
         -------
-        (new_domain, [attribute_columns, class_var_columns, meta_columns])
+
+        Args:
+            domain (Domain): original domain
+            data (Table): original data
+            deduplicate (bool): if True, variable names are deduplicated and
+               the result contains an additional list with names of renamed
+               variables
+
+        Returns:
+            (new_domain, [attribute_columns, class_var_columns, meta_columns])
+            or
+            (new_domain, [attribute_columns, class_var_columns, meta_columns], renamed)
         """
         # Allow type-checking with type() instead of isinstance() for exact comparison
         # pylint: disable=unidiomatic-typecheck
-
         variables = self.model().variables
         places = [[], [], []]  # attributes, class_vars, metas
         cols = [[], [], []]  # Xcols, Ycols, Mcols
@@ -269,8 +298,17 @@ class DomainEditor(QTableView):
                    chain(((at, Place.feature) for at in domain.attributes),
                          ((cl, Place.class_var) for cl in domain.class_vars),
                          ((mt, Place.meta) for mt in domain.metas)))):
-            return domain, [data.X, data.Y, data.metas]
+            if deduplicate:
+                return domain, [data.X, data.Y, data.metas], []
+            else:
+                return domain, [data.X, data.Y, data.metas]
 
+        relevant_names = [var[0] for var in variables if var[2] != Place.skip]
+        if deduplicate:
+            renamed_iter = iter(get_unique_names_duplicates(relevant_names))
+        else:
+            renamed_iter = iter(relevant_names)
+        renamed = []
         for (name, tpe, place, _, may_be_numeric), (orig_var, orig_plc) in \
                 zip(variables,
                         chain([(at, Place.feature) for at in domain.attributes],
@@ -279,27 +317,32 @@ class DomainEditor(QTableView):
             if place == Place.skip:
                 continue
 
+            new_name = next(renamed_iter)
+            if new_name != name and name not in renamed:
+                renamed.append(name)
+
             col_data = self._get_column(data, orig_var, orig_plc)
             is_sparse = sp.issparse(col_data)
 
-            if name == orig_var.name and tpe == type(orig_var):
+            if new_name == orig_var.name and tpe == type(orig_var):
                 var = orig_var
             elif tpe == type(orig_var):
-                # change the name so that all_vars will get the correct name
-                orig_var.name = name
-                var = orig_var
+                var = orig_var.copy(name=new_name)
             elif tpe == DiscreteVariable:
-                values = list(str(i) for i in unique(col_data) if not self._is_missing(i))
+                values = natural_sorted(
+                    list(str(i) for i in unique(col_data)
+                         if not self._is_missing(i))
+                )
                 round_numbers = numbers_are_round(orig_var, col_data)
                 col_data = [np.nan if self._is_missing(x) else values.index(str(x))
                             for x in self._iter_vals(col_data)]
                 if round_numbers:
                     values = [str(int(float(v))) for v in values]
-                var = tpe(name, values)
+                var = tpe(new_name, values)
                 col_data = self._to_column(col_data, is_sparse)
             elif tpe == StringVariable:
-                var = tpe.make(name)
-                if type(orig_var) == DiscreteVariable:
+                var = tpe.make(new_name)
+                if type(orig_var) in [DiscreteVariable, TimeVariable]:
                     col_data = [orig_var.repr_val(x) if not np.isnan(x) else ""
                                 for x in self._iter_vals(col_data)]
                 elif type(orig_var) == ContinuousVariable:
@@ -312,25 +355,29 @@ class DomainEditor(QTableView):
                 # in metas which are transformed to dense below
                 col_data = self._to_column(col_data, False, dtype=object)
             elif tpe == ContinuousVariable and type(orig_var) == DiscreteVariable:
-                var = tpe.make(name)
+                var = tpe.make(new_name)
                 if may_be_numeric:
                     col_data = [np.nan if self._is_missing(x) else float(orig_var.values[int(x)])
                                 for x in self._iter_vals(col_data)]
                 col_data = self._to_column(col_data, is_sparse)
             else:
-                var = tpe(name)
+                var = tpe(new_name)
             places[place].append(var)
             cols[place].append(col_data)
 
         # merge columns for X, Y and metas
         feats = cols[Place.feature]
-        X = self._merge(feats) if len(feats) else np.empty((len(data), 0))
+        X = self._merge(feats) if feats else np.empty((len(data), 0))
         Y = self._merge(cols[Place.class_var], force_dense=True)
         m = self._merge(cols[Place.meta], force_dense=True)
         domain = Domain(*places)
-        return domain, [X, Y, m]
+        if deduplicate:
+            return domain, [X, Y, m], renamed
+        else:
+            return domain, [X, Y, m]
 
-    def _get_column(self, data, source_var, source_place):
+    @staticmethod
+    def _get_column(data, source_var, source_place):
         """ Extract column from data and preserve sparsity. """
         if source_place == Place.meta:
             col_data = data[:, source_var].metas
@@ -342,6 +389,19 @@ class DomainEditor(QTableView):
 
     def set_domain(self, domain):
         self.variables = self.parse_domain(domain)
+        self.model().set_orig_variables(self.variables)
+
+    def reset_domain(self):
+        self.model().reset_variables()
+        self.variables = self.model().variables
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            index = self.indexAt(event.pos())
+            self.edit(index)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     @staticmethod
     def parse_domain(domain):

@@ -16,6 +16,28 @@ class Transformation(Reprable):
         :type variable: int or str or :obj:`~Orange.data.Variable`
         """
         self.variable = variable
+        self._create_cached_target_domain()
+
+    def _create_cached_target_domain(self):
+        """ If the same domain is used everytime this allows better caching of
+        domain transformations in from_table"""
+        if self.variable is not None:
+            if self.variable.is_primitive():
+                self._target_domain = Domain([self.variable])
+            else:
+                self._target_domain = Domain([], metas=[self.variable])
+
+    def __getstate__(self):
+        # Do not pickle the cached domain; rather recreate it after unpickling
+        state = self.__dict__.copy()
+        state.pop("_target_domain")
+        return state
+
+    def __setstate__(self, state):
+        # Ensure that cached target domain is created after unpickling.
+        # This solves the problem of unpickling old pickled models.
+        self.__dict__.update(state)
+        self._create_cached_target_domain()
 
     def __call__(self, data):
         """
@@ -24,16 +46,13 @@ class Transformation(Reprable):
         """
         inst = isinstance(data, Instance)
         if inst:
-            data = Table(data.domain, [data])
+            data = Table.from_list(data.domain, [data])
+        data = data.transform(self._target_domain)
         if self.variable.is_primitive():
-            domain = Domain([self.variable])
-            data = Table.from_table(domain, data)
             col = data.X
         else:
-            domain = Domain([], metas=[self.variable])
-            data = Table.from_table(domain, data)
             col = data.metas
-        if not sp.issparse(col):
+        if not sp.issparse(col) and col.ndim > 1:
             col = col.squeeze(axis=1)
         transformed = self.transform(col)
         if inst:
@@ -48,6 +67,12 @@ class Transformation(Reprable):
         raise NotImplementedError(
             "ColumnTransformations must implement method 'transform'.")
 
+    def __eq__(self, other):
+        return type(other) is type(self) and self.variable == other.variable
+
+    def __hash__(self):
+        return hash((type(self), self.variable))
+
 
 class Identity(Transformation):
     """Return an untransformed value of `c`.
@@ -56,42 +81,39 @@ class Identity(Transformation):
         return c
 
 
-class Indicator(Transformation):
+class _Indicator(Transformation):
+    def __init__(self, variable, value):
+        """
+        :param variable: The variable whose transformed value is returned.
+        :type variable: int or str or :obj:`~Orange.data.Variable`
+
+        :param value: The value to which the indicator refers
+        :type value: int or float
+        """
+        super().__init__(variable)
+        self.value = value
+
+    def __eq__(self, other):
+        return super().__eq__(other) and self.value == other.value
+
+    def __hash__(self):
+        return hash((type(self), self.variable, self.value))
+
+
+class Indicator(_Indicator):
     """
     Return an indicator value that equals 1 if the variable has the specified
     value and 0 otherwise.
     """
-    def __init__(self, variable, value):
-        """
-        :param variable: The variable whose transformed value is returned.
-        :type variable: int or str or :obj:`~Orange.data.Variable`
-
-        :param value: The value to which the indicator refers
-        :type value: int or float
-        """
-        super().__init__(variable)
-        self.value = value
-
     def transform(self, c):
         return c == self.value
 
 
-class Indicator1(Transformation):
+class Indicator1(_Indicator):
     """
     Return an indicator value that equals 1 if the variable has the specified
     value and -1 otherwise.
     """
-    def __init__(self, variable, value):
-        """
-        :param variable: The variable whose transformed value is returned.
-        :type variable: int or str or :obj:`~Orange.data.Variable`
-
-        :param value: The value to which the indicator refers
-        :type value: int or float
-        """
-        super().__init__(variable)
-        self.value = value
-
     def transform(self, c):
         return (c == self.value) * 2 - 1
 
@@ -118,11 +140,17 @@ class Normalizer(Transformation):
     def transform(self, c):
         if sp.issparse(c):
             if self.offset != 0:
-                raise ValueError('Non-zero offset in normalization '
-                                 'of sparse data')
+                raise ValueError('Normalization does not work for sparse data.')
             return c * self.factor
         else:
             return (c - self.offset) * self.factor
+
+    def __eq__(self, other):
+        return super().__eq__(other) \
+               and self.offset == other.offset and self.factor == other.factor
+
+    def __hash__(self):
+        return hash((type(self), self.variable, self.offset, self.factor))
 
 
 class Lookup(Transformation):
@@ -134,9 +162,9 @@ class Lookup(Transformation):
         :param variable: The variable whose transformed value is returned.
         :type variable: int or str or :obj:`~Orange.data.DiscreteVariable`
         :param lookup_table: transformations for each value of `self.variable`
-        :type lookup_table: np.array or list or tuple
+        :type lookup_table: np.array
         :param unknown: The value to be used as unknown value.
-        :type unknown: float or int 
+        :type unknown: float or int
         """
         super().__init__(variable)
         self.lookup_table = lookup_table
@@ -151,3 +179,13 @@ class Lookup(Transformation):
         column[mask] = 0
         values = self.lookup_table[column]
         return np.where(mask, self.unknown, values)
+
+    def __eq__(self, other):
+        return super().__eq__(other) \
+               and np.allclose(self.lookup_table, other.lookup_table,
+                               equal_nan=True) \
+               and np.allclose(self.unknown, other.unknown, equal_nan=True)
+
+    def __hash__(self):
+        return hash((type(self), self.variable,
+                     tuple(self.lookup_table), self.unknown))

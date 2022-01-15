@@ -13,6 +13,8 @@ from Orange.data import Unknown, Table
 
 from Orange.classification import MajorityLearner, SimpleTreeLearner
 from Orange.regression import MeanLearner
+from Orange.tests import test_filename
+
 
 class TestReplaceUnknowns(unittest.TestCase):
     def test_replacement(self):
@@ -125,20 +127,15 @@ class TestDefault(unittest.TestCase):
 
     def test_default(self):
         nan = np.nan
-        X = [
-            [1.0, nan, 0.0],
-            [2.0, 1.0, 3.0],
-            [nan, nan, nan]
+        X = [[nan, 0.0],
+             [1.0, 3.0],
+             [nan, nan]
         ]
         domain = data.Domain(
-            (data.DiscreteVariable("A", values=["0", "1", "2"],
-                                   base_value=2),
-             data.DiscreteVariable("B", values=["a", "b", "c"]),
+            (data.DiscreteVariable("B", values=("a", "b", "c")),
              data.ContinuousVariable("C"))
         )
         table = data.Table.from_numpy(domain, np.array(X))
-        v1 = impute.Default(1)(table, domain["A"])
-        self.assertEqual(v1.compute_value.value, 1)
 
         v2 = impute.Default(42)(table, domain["C"])
         self.assertEqual(v2.compute_value.value, 42)
@@ -154,7 +151,7 @@ class TestDefault(unittest.TestCase):
 
     def test_str(self):
         imputer = impute.Default(1)
-        self.assertIn('1', imputer.format_variable(data.Variable()))
+        self.assertIn('1', imputer.format_variable(data.Variable("y")))
 
 
 class TestAsValue(unittest.TestCase):
@@ -166,7 +163,7 @@ class TestAsValue(unittest.TestCase):
             [nan, nan, nan]
         ]
         domain = data.Domain(
-            (data.DiscreteVariable("A", values=["0", "1", "2"]),
+            (data.DiscreteVariable("A", values=("0", "1", "2")),
              data.ContinuousVariable("B"),
              data.ContinuousVariable("C"))
         )
@@ -211,7 +208,8 @@ class TestAsValue(unittest.TestCase):
         """
         table = self._create_table()
         domain = table.domain
-        table.X = sp.csr_matrix(table.X)
+        with table.unlocked():
+            table.X = sp.csr_matrix(table.X)
 
         v1, v2 = impute.AsValue()(table, domain[1])
         self.assertTrue(np.all(np.isfinite(v2.compute_value(table))))
@@ -230,11 +228,14 @@ class TestModel(unittest.TestCase):
         unknowns = np.isnan(X)
 
         domain = data.Domain(
-            (data.DiscreteVariable("A", values=["0", "1", "2"]),
+            (data.DiscreteVariable("A", values=("0", "1", "2")),
              data.ContinuousVariable("B"),
-             data.ContinuousVariable("C"))
+             data.ContinuousVariable("C")),
+            # the class is here to ensure the backmapper in model does not
+            # run and raise exception
+            data.DiscreteVariable("Z", values=("P", "M"))
         )
-        table = data.Table.from_numpy(domain, np.array(X))
+        table = data.Table.from_numpy(domain, np.array(X), [0,] * 3)
 
         v = impute.Model(MajorityLearner())(table, domain[0])
         self.assertTrue(np.all(np.isfinite(v.compute_value(table))))
@@ -283,7 +284,8 @@ class TestModel(unittest.TestCase):
 
     def test_str(self):
         imputer = impute.Model(MajorityLearner())
-        self.assertIn(MajorityLearner().name, imputer.format_variable(data.Variable()))
+        self.assertIn(MajorityLearner().name,
+                      imputer.format_variable(data.Variable("y")))
 
     def test_bad_domain(self):
         table = data.Table.from_file('iris')
@@ -303,7 +305,7 @@ class TestRandom(unittest.TestCase):
         unknowns = np.isnan(X)
 
         domain = data.Domain(
-            (data.DiscreteVariable("A", values=["0", "1", "2"]),
+            (data.DiscreteVariable("A", values=("0", "1", "2")),
              data.ContinuousVariable("B"),
              data.ContinuousVariable("C"))
         )
@@ -324,6 +326,6 @@ class TestRandom(unittest.TestCase):
 
 class TestImputer(unittest.TestCase):
     def test_imputer(self):
-        auto = data.Table('auto-mpg')
+        auto = data.Table(test_filename('datasets/imports-85.tab'))
         auto2 = preprocess.Impute()(auto)
         self.assertFalse(np.isnan(auto2.X).any())

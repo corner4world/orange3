@@ -1,11 +1,11 @@
 # Test methods with long descriptive names can omit docstrings
-# pylint: disable=missing-docstring,pointless-statement,blacklisted-name
+# pylint: disable=missing-docstring,pointless-statement,blacklisted-name,unsubscriptable-object
 import numpy as np
 
 from AnyQt.QtCore import Qt, QItemSelection
 from AnyQt.QtTest import QTest
 
-from Orange.data import Table, Domain
+from Orange.data import Table, Domain, ContinuousVariable, TimeVariable
 from Orange.preprocess import impute
 from Orange.widgets.data.owimpute import OWImpute, AsDefault, Learner, Method
 from Orange.widgets.tests.base import WidgetTest
@@ -14,7 +14,7 @@ from Orange.widgets.utils.itemmodels import select_row
 
 
 class Foo(Learner):
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, **kwargs):  # pylint: disable=arguments-differ
         1/0
 
 
@@ -25,6 +25,7 @@ class Bar:
 
 class FooBar(Learner):
     def __call__(self, data, *args, **kwargs):
+        # pylint: disable=arguments-differ, attribute-defined-outside-init
         bar = Bar()
         bar.domain = data.domain
         return bar
@@ -50,7 +51,8 @@ class TestOWImpute(WidgetTest):
         np.testing.assert_equal(imp_data.X, data.X)
         np.testing.assert_equal(imp_data.Y, data.Y)
 
-        self.send_signal(self.widget.Inputs.data, Table(data.domain), wait=1000)
+        self.send_signal(self.widget.Inputs.data,
+                         Table.from_domain(data.domain), wait=1000)
         imp_data = self.get_output(self.widget.Outputs.data)
         self.assertEqual(len(imp_data), 0)
 
@@ -114,6 +116,35 @@ class TestOWImpute(WidgetTest):
         varbg.button(Method.AsAboveSoBelow).click()
         self.assertIsInstance(widget.get_method_for_column(0), AsDefault)
         self.assertIsInstance(widget.get_method_for_column(2), AsDefault)
+
+    def test_overall_default(self):
+        domain = Domain(
+            [ContinuousVariable(f"c{i}") for i in range(3)]
+            + [TimeVariable(f"t{i}") for i in range(3)],
+            [])
+        n = np.nan
+        x = np.array([
+            [1, 2, n, 1000, n, n],
+            [2, n, 1, n, 2000, 2000]
+        ])
+        data = Table(domain, x, np.empty((2, 0)))
+
+        widget = self.widget
+        widget.default_numeric_value = 3.14
+        widget.default_time = 42
+        widget.default_method_index = Method.Default
+
+        self.send_signal(self.widget.Inputs.data, data)
+        imp_data = self.get_output(self.widget.Outputs.data)
+        np.testing.assert_almost_equal(
+            imp_data.X,
+            [[1, 2, 3.14, 1000, 42, 42],
+             [2, 3.14, 1, 42, 2000, 2000]]
+        )
+
+        widget.numeric_value_widget.setValue(100)
+        QTest.keyClick(widget.numeric_value_widget, Qt.Key_Enter)
+        self.assertEqual(widget.default_numeric_value, 100)
 
     def test_value_edit(self):
         data = Table("heart_disease")[::10]

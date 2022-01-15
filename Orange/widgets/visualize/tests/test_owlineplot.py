@@ -7,9 +7,14 @@ from unittest.mock import patch, Mock
 import numpy as np
 import scipy.sparse as sp
 
-from AnyQt.QtCore import Qt
+from AnyQt.QtCore import Qt, QPointF
+from AnyQt.QtGui import QFont
 
+import pyqtgraph
+from pyqtgraph import PlotCurveItem
 from pyqtgraph.Point import Point
+
+from orangewidget.tests.base import DEFAULT_TIMEOUT
 
 from Orange.data import Table
 from Orange.widgets.tests.base import (
@@ -41,13 +46,10 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
         return self.widget.selection
 
     def test_input_data(self):
-        no_data_info = "No data on input."
-        self.assertEqual(self.widget.infoLabel.text(), no_data_info)
         self.send_signal(self.widget.Inputs.data, self.data)
         self.assertEqual(self.widget.group_view.model().rowCount(), 2)
         self.send_signal(self.widget.Inputs.data, None)
         self.assertEqual(self.widget.group_view.model().rowCount(), 1)
-        self.assertEqual(self.widget.infoLabel.text(), no_data_info)
 
     def test_input_continuous_class(self):
         self.send_signal(self.widget.Inputs.data, self.housing)
@@ -118,7 +120,8 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
 
     def test_saved_selection(self):
         data = self.data.copy()
-        data[0, 0] = np.nan
+        with data.unlocked():
+            data[0, 0] = np.nan
         self.send_signal(self.widget.Inputs.data, data)
         mask = np.zeros(len(data) - 1, dtype=bool)
         mask[::10] = True
@@ -137,8 +140,8 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
     def test_selection_line(self):
         event = Mock()
         event.button.return_value = Qt.LeftButton
-        event.buttonDownPos.return_value = Point(2.5, 5.8)
-        event.pos.return_value = Point(3, 4.7)
+        event.buttonDownPos.return_value = Point(0, 0)
+        event.pos.return_value = Point(1, 1)
         event.isFinish.return_value = True
 
         # drag a line before data is sent
@@ -147,11 +150,19 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
 
         # drag a line after data is sent
         self.send_signal(self.widget.Inputs.data, self.data)
+
+        # set view-dependent click coordinates
+        pos_down, pos_up = QPointF(2.38, 4.84), QPointF(3.58, 4.76)
+        mapToParent = self.widget.graph.view_box.childGroup.mapToParent
+
+        event.buttonDownPos.return_value = mapToParent(pos_down)
+        event.pos.return_value = mapToParent(pos_up)
+
         self.widget.graph.view_box.mouseDragEvent(event)
         line = self.widget.graph.view_box.selection_line
         self.assertFalse(line.line().isNull())
 
-        # click oon the plot resets selection
+        # click on the plot resets selection
         self.assertEqual(len(self.widget.selection), 55)
         self.widget.graph.view_box.mouseClickEvent(event)
         self.assertListEqual(self.widget.selection, [])
@@ -175,7 +186,8 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
 
     def test_data_with_missing_values(self):
         data = self.data.copy()
-        data[0, 0] = np.nan
+        with data.unlocked():
+            data[0, 0] = np.nan
         self.send_signal(self.widget.Inputs.data, data)
         self.assertTrue(self.widget.Information.hidden_instances.is_shown())
         self.send_signal(self.widget.Inputs.data, None)
@@ -216,6 +228,14 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
         self.assertEqual(p, 2)
         self.assertFalse(self.widget.graph.legend.isVisible())
 
+    def test_group_var_none_single_instance(self):
+        self.send_signal(self.widget.Inputs.data, self.housing[:1])
+        m, n, p = self.widget.graph.view_box._profile_items.shape
+        self.assertEqual(m, len(self.housing.domain.attributes))
+        self.assertEqual(n, 1)
+        self.assertEqual(p, 2)
+        self.assertFalse(self.widget.graph.legend.isVisible())
+
     def test_datasets(self):
         for ds in datasets.datasets():
             self.send_signal(self.widget.Inputs.data, ds)
@@ -249,7 +269,8 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
         settings["show_range"] = False
         w = self.create_widget(OWLinePlot, stored_settings=settings)
         self.send_signal(w.Inputs.data, self.data, widget=w)
-        self.assertEqual(len(w.graph.items()), 31)
+        curves = [i for i in w.graph.items() if isinstance(i, PlotCurveItem)]
+        self.assertEqual(len(curves), 3)
 
     def test_sparse_data(self):
         table = Table("iris").to_sparse()
@@ -263,6 +284,80 @@ class TestOWLinePLot(WidgetTest, WidgetOutputsTestMixin):
         self.widget.report_button.click()
         self.send_signal(self.widget.Inputs.data, None)
         self.widget.report_button.click()
+
+    def test_unconditional_commit_on_new_signal(self):
+        with patch.object(self.widget.commit, 'now') as commit:
+            self.widget.auto_commit = False
+            commit.reset_mock()
+            self.send_signal(self.widget.Inputs.data, self.titanic)
+            commit.assert_called()
+
+    def test_visual_settings(self, timeout=DEFAULT_TIMEOUT):
+        graph = self.widget.graph
+        font = QFont()
+        font.setItalic(True)
+        font.setFamily("Helvetica")
+
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.wait_until_finished(timeout=timeout)
+
+        key, value = ("Fonts", "Font family", "Font family"), "Helvetica"
+        self.widget.set_visual_settings(key, value)
+
+        key, value = ("Fonts", "Title", "Font size"), 20
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Title", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(20)
+        self.assertFontEqual(graph.parameter_setter.title_item.item.font(), font)
+
+        key, value = ("Fonts", "Axis title", "Font size"), 14
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Axis title", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(14)
+        for ax in ["bottom", "left"]:
+            axis = graph.parameter_setter.getAxis(ax)
+            self.assertFontEqual(axis.label.font(), font)
+
+        key, value = ('Fonts', 'Axis ticks', 'Font size'), 15
+        self.widget.set_visual_settings(key, value)
+        key, value = ('Fonts', 'Axis ticks', 'Italic'), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(15)
+        for ax in ["bottom", "left"]:
+            axis = graph.parameter_setter.getAxis(ax)
+            self.assertFontEqual(axis.style["tickFont"], font)
+
+        key, value = ("Fonts", "Legend", "Font size"), 16
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Legend", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(16)
+        legend_item = list(graph.parameter_setter.legend_items)[0]
+        self.assertFontEqual(legend_item[1].item.font(), font)
+
+        key, value = ("Annotations", "Title", "Title"), "Foo"
+        self.widget.set_visual_settings(key, value)
+        self.assertEqual(graph.parameter_setter.title_item.item.toPlainText(), "Foo")
+        self.assertEqual(graph.parameter_setter.title_item.text, "Foo")
+
+        key, value = ("Annotations", "x-axis title", "Title"), "Foo2"
+        self.widget.set_visual_settings(key, value)
+        axis = graph.parameter_setter.getAxis("bottom")
+        self.assertEqual(axis.label.toPlainText().strip(), "Foo2")
+        self.assertEqual(axis.labelText, "Foo2")
+
+        key, value = ("Annotations", "y-axis title", "Title"), "Foo3"
+        self.widget.set_visual_settings(key, value)
+        axis = graph.parameter_setter.getAxis("left")
+        self.assertEqual(axis.label.toPlainText().strip(), "Foo3")
+        self.assertEqual(axis.labelText, "Foo3")
+
+    def assertFontEqual(self, font1, font2):
+        self.assertEqual(font1.family(), font2.family())
+        self.assertEqual(font1.pointSize(), font2.pointSize())
+        self.assertEqual(font1.italic(), font2.italic())
 
 
 class TestSegmentsIntersection(unittest.TestCase):
@@ -290,3 +385,7 @@ class TestSegmentsIntersection(unittest.TestCase):
                           for i in range(y.shape[1])])
         i = line_intersects_profiles(a, b, table)
         np.testing.assert_array_equal(np.array([False, True, True, True]), i)
+
+
+if __name__ == "__main__":
+    unittest.main()

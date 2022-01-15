@@ -3,7 +3,7 @@ from math import log, sqrt
 from typing import Any, Callable, Optional
 
 from AnyQt.QtCore import Qt, QRectF, QSize, QPointF, QSizeF, QModelIndex, \
-    QItemSelection, QT_VERSION
+    QItemSelection, QItemSelectionModel, QT_VERSION
 from AnyQt.QtGui import QPainter, QPen, QColor, QBrush, QMouseEvent
 from AnyQt.QtWidgets import QSizePolicy, QGraphicsScene, QLabel, QSlider, \
     QListView, QStyledItemDelegate, QStyleOptionViewItem, QStyle
@@ -165,7 +165,7 @@ class OWPythagoreanForest(OWWidget):
     priority = 1001
 
     class Inputs:
-        random_forest = Input("Random forest", RandomForestModel)
+        random_forest = Input("Random Forest", RandomForestModel, replaces=["Random forest"])
 
     class Outputs:
         tree = Output("Tree", TreeModel)
@@ -174,10 +174,14 @@ class OWPythagoreanForest(OWWidget):
     graph_name = 'scene'
 
     # Settings
-    depth_limit = settings.ContextSetting(10)
+    settingsHandler = settings.ClassValuesContextHandler()
+
+    depth_limit = settings.Setting(10)
     target_class_index = settings.ContextSetting(0)
     size_calc_idx = settings.Setting(0)
     zoom = settings.Setting(200)
+
+    selected_index = settings.ContextSetting(None)
 
     SIZE_CALCULATION = [
         ('Normal', lambda x: x),
@@ -199,7 +203,6 @@ class OWPythagoreanForest(OWWidget):
         self.rf_model = None
         self.forest = None
         self.instances = None
-        self.clf_dataset = None
 
         self.color_palette = None
 
@@ -210,18 +213,22 @@ class OWPythagoreanForest(OWWidget):
 
         # Display controls area
         box_display = gui.widgetBox(self.controlArea, 'Display')
+        # maxValue is set to a wide three-digit number to probably ensure the
+        # proper label width. The maximum is later set to match the tree depth
         self.ui_depth_slider = gui.hSlider(
             box_display, self, 'depth_limit', label='Depth', ticks=False,
+            maxValue=900
         )  # type: QSlider
         self.ui_target_class_combo = gui.comboBox(
             box_display, self, 'target_class_index', label='Target class',
             orientation=Qt.Horizontal, items=[], contentsLength=8,
-        )  # type: gui.OrangeComboBox
+            searchable=True
+        )
         self.ui_size_calc_combo = gui.comboBox(
             box_display, self, 'size_calc_idx', label='Size',
             orientation=Qt.Horizontal,
             items=list(zip(*self.SIZE_CALCULATION))[0], contentsLength=8,
-        )  # type: gui.OrangeComboBox
+        )
         self.ui_zoom_slider = gui.hSlider(
             box_display, self, 'zoom', label='Zoom', ticks=False, minValue=100,
             maxValue=400, createLabel=False, intOnly=False,
@@ -265,29 +272,35 @@ class OWPythagoreanForest(OWWidget):
     @Inputs.random_forest
     def set_rf(self, model=None):
         """When a different forest is given."""
+        self.closeContext()
         self.clear()
         self.rf_model = model
 
         if model is not None:
+            self.instances = model.instances
+            self._update_target_class_combo()
+
             self.forest = self._get_forest_adapter(self.rf_model)
             self.forest_model[:] = self.forest.trees
 
-            self.instances = model.instances
-            # This bit is important for the regression classifier
-            if self.instances is not None and self.instances.domain != model.domain:
-                self.clf_dataset = self.instances.transform(self.rf_model.domain)
-            else:
-                self.clf_dataset = self.instances
-
             self._update_info_box()
-            self._update_target_class_combo()
             self._update_depth_slider()
+
+            self.openContext(
+                model.domain.class_var if model.domain is not None else None
+            )
+        # Restore item selection
+        if self.selected_index is not None:
+            index = self.list_view.model().index(self.selected_index)
+            selection = QItemSelection(index, index)
+            self.list_view.selectionModel().select(selection, QItemSelectionModel.ClearAndSelect)
 
     def clear(self):
         """Clear all relevant data from the widget."""
         self.rf_model = None
         self.forest = None
         self.forest_model.clear()
+        self.selected_index = None
 
         self._clear_info_box()
         self._clear_target_class_combo()
@@ -317,15 +330,15 @@ class OWPythagoreanForest(OWWidget):
             values = list(ContinuousTreeNode.COLOR_METHODS.keys())
         label.setText(label_text)
         self.ui_target_class_combo.addItems(values)
-        self.ui_target_class_combo.setCurrentIndex(self.target_class_index)
+        # set it to 0, context will change if required
+        self.target_class_index = 0
 
     def _clear_info_box(self):
         self.ui_info.setText('No forest on input.')
 
     def _clear_target_class_combo(self):
         self.ui_target_class_combo.clear()
-        self.target_class_index = 0
-        self.ui_target_class_combo.setCurrentIndex(self.target_class_index)
+        self.target_class_index = -1
 
     def _clear_depth_slider(self):
         self.ui_depth_slider.parent().setEnabled(False)
@@ -342,19 +355,19 @@ class OWPythagoreanForest(OWWidget):
         super().onDeleteWidget()
         self.clear()
 
-    def commit(self, selection):
-        # type: (QItemSelection) -> None
+    def commit(self, selection: QItemSelection) -> None:
         """Commit the selected tree to output."""
         selected_indices = selection.indexes()
 
         if not len(selected_indices):
+            self.selected_index = None
             self.Outputs.tree.send(None)
             return
 
-        selected_index, = selection.indexes()
+        # We only allow selecting a single tree so there will always be one index
+        self.selected_index = selected_indices[0].row()
 
-        idx = selected_index.row()
-        tree = self.rf_model.trees[idx]
+        tree = self.rf_model.trees[self.selected_index]
         tree.instances = self.instances
         tree.meta_target_class_index = self.target_class_index
         tree.meta_size_calc_idx = self.size_calc_idx

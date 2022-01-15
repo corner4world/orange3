@@ -4,11 +4,27 @@ and once used from the bottlechest package (fork of bottleneck).
 
 It also patches bottleneck to contain these functions.
 """
-from warnings import warn
+import warnings
+from typing import Iterable
 
 import bottleneck as bn
 import numpy as np
+import pandas
+import scipy.stats.stats
 from scipy import sparse as sp
+
+from sklearn.utils.sparsefuncs import mean_variance_axis
+
+
+def _eliminate_zeros(x):
+    """Eliminate zeros from sparse matrix, or raise appropriate warning."""
+    if hasattr(x, "eliminate_zeros"):
+        x.eliminate_zeros()
+    else:
+        warnings.warn(
+            f"`{x.__type__}` does not implement `eliminate_zeros`. Some values "
+            f"in the sparse matrix may by explicit zeros."
+        )
 
 
 def _count_nans_per_row_sparse(X, weights, dtype=None):
@@ -72,7 +88,7 @@ def sparse_implicit_zero_weights(x, weights):
 def bincount(x, weights=None, max_val=None, minlength=0):
     """Return counts of values in array X.
 
-    Works kind of like np.bincount(), except that it also supports floating
+    Works kind of like np.bincount(), except that it also supports
     arrays with nans.
 
     Parameters
@@ -122,8 +138,8 @@ def bincount(x, weights=None, max_val=None, minlength=0):
 
         x = x.data
 
-    x = np.asanyarray(x)
-    if x.dtype.kind == 'f' and bn.anynan(x):
+    x = np.asanyarray(x, dtype=float)
+    if bn.anynan(x):
         nonnan = ~np.isnan(x)
         x = x[nonnan]
         if weights is not None:
@@ -174,11 +190,11 @@ def countnans(x, weights=None, axis=None, dtype=None, keepdims=False):
     """
     if not sp.issparse(x):
         x = np.asanyarray(x)
-        isnan = np.isnan(x)
+        is_nan = np.isnan(x)
         if weights is not None and weights.shape == x.shape:
-            isnan = isnan * weights
+            is_nan = is_nan * weights
 
-        counts = isnan.sum(axis=axis, dtype=dtype, keepdims=keepdims)
+        counts = is_nan.sum(axis=axis, dtype=dtype, keepdims=keepdims)
         if weights is not None and weights.shape != x.shape:
             counts = counts * weights
     else:
@@ -214,9 +230,8 @@ def contingency(X, y, max_X=None, max_y=None, weights=None, mask=None):
     array is 2d, the function returns a 3d array, with the first dimension
     corresponding to column index (variable in the input array).
 
-    The rows of contingency matrix correspond to values of variables, the
-    columns correspond to values in vector `y`.
-    (??? isn't it the other way around ???)
+    The column of contingency matrix correspond to values of variables, the
+    row correspond to values in vector `y`.
 
     Rows in the input array can be weighted (argument `weights`). A subset of
     columns can be selected by additional argument `mask`.
@@ -245,20 +260,26 @@ def contingency(X, y, max_X=None, max_y=None, weights=None, mask=None):
         for each column of X;
         ny number of uniques in y,
         nx number of uniques in column of X.
-    nans : array_like
+    nans_cols : array_like
         Number of nans in each column of X for each unique value of y.
+    nans_rows : array_like
+        Number of nans in y for each unique value in columns of X.
+    nans : array_like
+        Number of nans in column of X and y at the same time.
     """
     was_1d = False
     if X.ndim == 1:
         X = X[..., np.newaxis]
         was_1d = True
 
-    contingencies, nans = [], []
+    contingencies, nans_cols, nans_rows, nans = [], [], [], []
     ny = np.unique(y).size if max_y is None else max_y + 1
     for i in range(X.shape[1]):
         if mask is not None and not mask[i]:
             contingencies.append(np.zeros((ny, max_X + 1)))
-            nans.append(np.zeros(ny))
+            nans_cols.append(np.zeros(ny))
+            nans_rows.append(None)
+            nans.append(0)
             continue
         col = X[..., i]
         nx = np.unique(col[~np.isnan(col)]).size if max_X is None else max_X + 1
@@ -268,11 +289,22 @@ def contingency(X, y, max_X=None, max_y=None, weights=None, mask=None):
             bincount(y + ny * col,
                      minlength=ny * nx,
                      weights=weights)[0].reshape(nx, ny).T)
-        nans.append(
-            bincount(y[np.isnan(col)], minlength=ny)[0])
+
+        nan_col_mask = np.isnan(col)
+        nan_row_mask = np.isnan(y)
+        nan_mask = nan_col_mask & nan_row_mask
+        weights_ = np.ones(len(y)) if weights is None else weights
+
+        nans_cols.append(
+            bincount(y[nan_col_mask], weights=weights_[nan_col_mask],
+                     minlength=ny)[0])
+        nans_rows.append(
+            bincount(col[nan_row_mask], weights=weights_[nan_row_mask],
+                     minlength=nx)[0])
+        nans.append(np.sum(nan_mask * weights_))
     if was_1d:
-        return contingencies[0], nans[0]
-    return np.array(contingencies), np.array(nans)
+        return contingencies[0], nans_cols[0], nans_rows[0], nans[0]
+    return np.array(contingencies), np.array(nans_cols), nans_rows, nans
 
 
 def stats(X, weights=None, compute_variance=False):
@@ -316,15 +348,16 @@ def stats(X, weights=None, compute_variance=False):
             w_X = X.multiply(sp.csr_matrix(np.c_[weights] / sum(weights)))
             return np.asarray(w_X.sum(axis=0)).ravel()
         else:
-            return np.nansum(X * np.c_[weights] / sum(weights), axis=0)
+            return bn.nansum(X * np.c_[weights] / sum(weights), axis=0)
 
     if X.size and is_numeric and not is_sparse:
         nans = np.isnan(X).sum(axis=0)
         return np.column_stack((
             np.nanmin(X, axis=0),
             np.nanmax(X, axis=0),
-            np.nanmean(X, axis=0) if not weighted else weighted_mean(),
-            np.nanvar(X, axis=0) if compute_variance else np.zeros(X.shape[1]),
+            nanmean(X, axis=0) if not weighted else weighted_mean(),
+            nanvar(X, axis=0) if compute_variance else \
+                np.zeros(X.shape[1] if X.ndim == 2 else 1),
             nans,
             X.shape[0] - nans))
     elif is_sparse and X.size:
@@ -341,7 +374,8 @@ def stats(X, weights=None, compute_variance=False):
             X.shape[0] - non_zero,
             non_zero))
     else:
-        nans = (~X.astype(bool)).sum(axis=0) if X.size else np.zeros(X.shape[1])
+        nans = (pandas.isnull(X).sum(axis=0) + (X == "").sum(axis=0)) \
+            if X.size else np.zeros(X.shape[1])
         return np.column_stack((
             np.tile(np.inf, X.shape[1]),
             np.tile(-np.inf, X.shape[1]),
@@ -391,8 +425,8 @@ def mean(x):
          if sp.issparse(x) else
          np.mean(x))
     if np.isnan(m):
-        warn('mean() resulted in nan. If input can contain nan values, perhaps '
-             'you meant nanmean?', stacklevel=2)
+        warnings.warn('mean() resulted in nan. If input can contain nan values,'
+                      ' perhaps you meant nanmean?', stacklevel=2)
     return m
 
 
@@ -421,27 +455,31 @@ def nansum(x, axis=None):
 
 def nanmean(x, axis=None):
     """ Equivalent of np.nanmean that supports sparse or dense matrices. """
-    def nanmean_sparse(x):
-        n_values = np.prod(x.shape) - np.sum(np.isnan(x.data))
-        return np.nansum(x.data) / n_values
+    if not sp.issparse(x):
+        means = bn.nanmean(x, axis=axis)
+    elif axis is None:
+        means, _ = mean_variance_axis(x, axis=0)
+        means = np.nanmean(means)
+    else:
+        means, _ = mean_variance_axis(x, axis=axis)
 
-    return _apply_func(x, np.nanmean, nanmean_sparse, axis=axis)
+    return means
 
 
-def nanvar(x, axis=None):
+def nanvar(x, axis=None, ddof=0):
     """ Equivalent of np.nanvar that supports sparse or dense matrices. """
     def nanvar_sparse(x):
         n_vals = np.prod(x.shape) - np.sum(np.isnan(x.data))
         n_zeros = np.prod(x.shape) - len(x.data)
-        mean = np.nansum(x.data) / n_vals
-        return (np.nansum((x.data - mean) ** 2) + mean ** 2 * n_zeros) / n_vals
+        avg = np.nansum(x.data) / n_vals
+        return (np.nansum((x.data - avg) ** 2) + avg ** 2 * n_zeros) / (n_vals - ddof)
 
-    return _apply_func(x, np.nanvar, nanvar_sparse, axis=axis)
+    return _apply_func(x, bn.nanvar, nanvar_sparse, axis=axis)
 
 
-def nanstd(x, axis=None):
+def nanstd(x, axis=None, ddof=0):
     """ Equivalent of np.nanstd that supports sparse and dense matrices. """
-    return np.sqrt(nanvar(x, axis=axis))
+    return np.sqrt(nanvar(x, axis=axis, ddof=ddof))
 
 
 def nanmedian(x, axis=None):
@@ -460,6 +498,18 @@ def nanmedian(x, axis=None):
             return np.nanmedian(x.toarray())
 
     return _apply_func(x, np.nanmedian, nanmedian_sparse, axis=axis)
+
+
+def nanmode(x, axis=0):
+    """ A temporary replacement for a scipy.stats.mode.
+
+    This function returns mode NaN if all values are NaN (scipy<1.2.0 wrongly
+    returns zero). Also, this function returns count NaN if all values are NaN
+    (scipy=1.3.0 returns some number)."""
+    nans = np.isnan(np.array(x)).sum(axis=axis, keepdims=True) == x.shape[axis]
+    res = scipy.stats.stats.mode(x, axis)
+    return scipy.stats.stats.ModeResult(np.where(nans, np.nan, res.mode),
+                                        np.where(nans, np.nan, res.count))
 
 
 def unique(x, return_counts=False):
@@ -555,16 +605,133 @@ def digitize(x, bins, right=False):
     return r
 
 
-def var(x, axis=None):
+def var(x, axis=None, ddof=0):
     """ Equivalent of np.var that supports sparse and dense matrices. """
     if not sp.issparse(x):
-        return np.var(x, axis)
+        return np.var(x, axis, ddof=ddof)
 
     result = x.multiply(x).mean(axis) - np.square(x.mean(axis))
     result = np.squeeze(np.asarray(result))
+
+    # Apply correction for degrees of freedom
+    n = np.prod(x.shape) if axis is None else x.shape[axis]
+    result *= n / (n - ddof)
+
     return result
 
 
-def std(x, axis=None):
+def std(x, axis=None, ddof=0):
     """ Equivalent of np.std that supports sparse and dense matrices. """
-    return np.sqrt(var(x, axis=axis))
+    return np.sqrt(var(x, axis=axis, ddof=ddof))
+
+
+def nan_to_num(x, copy=True):
+    """ Equivalent of np.nan_to_num that supports sparse and dense matrices. """
+    if not sp.issparse(x):
+        return np.nan_to_num(x, copy=copy)
+
+    if copy:
+        x = x.copy()
+    np.nan_to_num(x.data, copy=False)
+    _eliminate_zeros(x)
+    return x
+
+
+def isnan(x, out=None):
+    """ Equivalent of np.isnan that supports sparse and dense matrices. """
+    if not sp.issparse(x):
+        return np.isnan(x, out=out)
+
+    if out is None:
+        x = x.copy()
+    elif out is not x:
+        raise ValueError(
+            "The `out` parameter can only be set `x` when using sparse matrices"
+        )
+
+    np.isnan(x.data, out=x.data)
+    _eliminate_zeros(x)
+    return x
+
+
+def any_nan(x, axis=None):
+    """ Check if any of the values in a matrix is nan. """
+    if not sp.issparse(x):
+        return np.isnan(x).any(axis=axis)
+
+    if axis is None:
+        return np.isnan(x.data).any()
+
+    if axis == 0:
+        x = x.tocsc()
+    elif axis == 1:
+        x = x.tocsr()
+
+    ax = x.ndim - axis - 1
+    result = np.zeros(x.shape[ax], dtype=bool)
+    for i in range(x.shape[ax]):
+        vals = x.data[x.indptr[i]:x.indptr[i + 1]]
+        result[i] = np.isnan(vals).any()
+
+    return result
+
+
+def all_nan(x, axis=None):
+    """
+    Check if all of the values in a matrix is nan. Works for sparse matrix too.
+    """
+    if not sp.issparse(x):
+        return np.isnan(x).all(axis=axis)
+
+    if axis is None:
+        # when x.nnz < actual shape there are zero values which are not nan
+        return np.prod(x.shape) == x.nnz and np.isnan(x.data).all()
+
+    if axis == 0:
+        x = x.tocsc()
+    elif axis == 1:
+        x = x.tocsr()
+
+    ax = x.ndim - axis - 1
+    axis_len = x.shape[axis]
+    result = np.zeros(x.shape[ax], dtype=bool)
+    for i in range(x.shape[ax]):
+        vals = x.data[x.indptr[i]:x.indptr[i + 1]]
+        result[i] = axis_len == len(vals) and np.isnan(vals).all()
+
+    return result
+
+
+def FDR(p_values: Iterable, dependent=False, m=None, ordered=False) -> Iterable:
+    """ `False Discovery Rate <http://en.wikipedia.org/wiki/False_discovery_rate>`_
+        correction on a list of p-values.
+
+    :param p_values: list or np.ndarray of p-values.
+    :param dependent: use correction for dependent hypotheses (default False).
+    :param m: number of hypotheses tested (default ``len(p_values)``).
+    :param ordered: prevent sorting of p-values if they are already sorted
+        (default False).
+    :return: list or np.ndarray, same as the input
+    """
+    if p_values is None or len(p_values) == 0 or \
+            (m is not None and m <= 0):
+        return None
+
+    is_list = isinstance(p_values, list)
+    p_values = np.array(p_values)
+    if m is None:
+        m = len(p_values)
+    if not ordered:
+        ordered = (np.diff(p_values) >= 0).all()
+        if not ordered:
+            indices = np.argsort(p_values)
+            p_values = p_values[indices]
+
+    if dependent:  # correct q for dependent tests
+        m *= sum(1 / np.arange(1, m + 1))
+
+    fdrs = (p_values * m / np.arange(1, len(p_values) + 1))[::-1]
+    fdrs = np.array(np.minimum.accumulate(fdrs)[::-1])
+    if not ordered:
+        fdrs[indices] = fdrs.copy()
+    return fdrs if not is_list else list(fdrs)

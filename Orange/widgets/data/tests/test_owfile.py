@@ -1,29 +1,30 @@
 # Test methods with long descriptive names can omit docstrings
-# pylint: disable=missing-docstring
+# pylint: disable=missing-docstring,protected-access
 from os import path, remove, getcwd
 from os.path import dirname
+import unittest
 from unittest.mock import Mock, patch
 import pickle
 import tempfile
 import warnings
+import time
 
 import numpy as np
 import scipy.sparse as sp
 
-from AnyQt.QtCore import QMimeData, QPoint, Qt, QUrl
+from AnyQt.QtCore import QMimeData, QPoint, Qt, QUrl, QThread, QObject
 from AnyQt.QtGui import QDragEnterEvent, QDropEvent
 from AnyQt.QtWidgets import QComboBox
 
 import Orange
-from Orange.canvas.application.canvasmain import CanvasMainWindow
-from Orange.canvas.scheme import Scheme
+
 from Orange.data import FileFormat, dataset_dirs, StringVariable, Table, \
     Domain, DiscreteVariable, ContinuousVariable
 from Orange.util import OrangeDeprecationWarning
 
 from Orange.data.io import TabReader
 from Orange.tests import named_file
-from Orange.widgets.data.owfile import OWFile
+from Orange.widgets.data.owfile import OWFile, OWFileDropHandler, DEFAULT_READER_TEXT
 from Orange.widgets.utils.filedialogs import dialog_formats, format_filter, RecentPath
 from Orange.widgets.tests.base import WidgetTest
 from Orange.widgets.utils.domaineditor import ComboDelegate, VarTypeDelegate, VarTableModel
@@ -47,7 +48,8 @@ class WithWarnings(FileFormat):
     EXTENSIONS = ('.with_warning',)
     DESCRIPTION = "Warning"
 
-    def read(self):
+    @staticmethod
+    def read():
         warnings.warn("Some warning")
         return Orange.data.Table("iris")
 
@@ -57,7 +59,8 @@ class MyCustomTabReader(FileFormat):
     DESCRIPTION = "Always return iris"
     PRIORITY = 999999
 
-    def read(self):
+    @staticmethod
+    def read():
         return Orange.data.Table("iris")
 
 
@@ -140,6 +143,74 @@ class TestOWFile(WidgetTest):
         data = self.get_output(self.widget.Outputs.data)
         self.assertIsInstance(data.domain["iris"], StringVariable)
 
+    def test_rename_duplicates(self):
+        self.open_dataset("iris")
+
+        idx = self.widget.domain_editor.model().createIndex(3, 0)
+        self.assertFalse(self.widget.Warning.renamed_vars.is_shown())
+        self.widget.domain_editor.model().setData(idx, "iris", Qt.EditRole)
+        self.widget.apply_button.click()
+        data = self.get_output(self.widget.Outputs.data)
+        self.assertIn("iris (1)", data.domain)
+        self.assertIn("iris (2)", data.domain)
+        self.assertTrue(self.widget.Warning.renamed_vars.is_shown())
+
+        self.widget.domain_editor.model().setData(idx, "different iris", Qt.EditRole)
+        self.widget.apply_button.click()
+        self.assertFalse(self.widget.Warning.renamed_vars.is_shown())
+
+    def test_variable_name_change(self):
+        """
+        Test whether the name of the variable is changed correctly by
+        the domaineditor.
+        """
+        self.open_dataset("iris")
+
+        # just rename
+        idx = self.widget.domain_editor.model().createIndex(4, 0)
+        self.widget.domain_editor.model().setData(idx, "a", Qt.EditRole)
+        self.widget.apply_button.click()
+        data = self.get_output(self.widget.Outputs.data)
+        self.assertIn("a", data.domain)
+
+        idx = self.widget.domain_editor.model().createIndex(3, 0)
+        self.widget.domain_editor.model().setData(idx, "d", Qt.EditRole)
+        self.widget.apply_button.click()
+        data = self.get_output(self.widget.Outputs.data)
+        self.assertIn("d", data.domain)
+
+        # rename and change to text
+        idx = self.widget.domain_editor.model().createIndex(4, 0)
+        self.widget.domain_editor.model().setData(idx, "b", Qt.EditRole)
+        idx = self.widget.domain_editor.model().createIndex(4, 1)
+        self.widget.domain_editor.model().setData(idx, "text", Qt.EditRole)
+        self.widget.apply_button.click()
+        data = self.get_output(self.widget.Outputs.data)
+        self.assertIn("b", data.domain)
+        self.assertIsInstance(data.domain["b"], StringVariable)
+
+        # rename and change to discrete
+        idx = self.widget.domain_editor.model().createIndex(4, 0)
+        self.widget.domain_editor.model().setData(idx, "c", Qt.EditRole)
+        idx = self.widget.domain_editor.model().createIndex(4, 1)
+        self.widget.domain_editor.model().setData(
+            idx, "categorical", Qt.EditRole)
+        self.widget.apply_button.click()
+        data = self.get_output(self.widget.Outputs.data)
+        self.assertIn("c", data.domain)
+        self.assertIsInstance(data.domain["c"], DiscreteVariable)
+
+        # rename and change to continuous
+        self.open_dataset("zoo")
+        idx = self.widget.domain_editor.model().createIndex(0, 0)
+        self.widget.domain_editor.model().setData(idx, "c", Qt.EditRole)
+        idx = self.widget.domain_editor.model().createIndex(0, 1)
+        self.widget.domain_editor.model().setData(idx, "numeric", Qt.EditRole)
+        self.widget.apply_button.click()
+        data = self.get_output(self.widget.Outputs.data)
+        self.assertIn("c", data.domain)
+        self.assertIsInstance(data.domain["c"], ContinuousVariable)
+
     def open_dataset(self, name):
         filename = FileFormat.locate(name, dataset_dirs)
         self.widget.add_path(filename)
@@ -170,7 +241,7 @@ class TestOWFile(WidgetTest):
         self.assertEqual(file_name, path.basename(self.widget.last_path()))
         self.assertTrue(self.widget.Error.file_not_found.is_shown())
         self.assertIsNone(self.get_output(self.widget.Outputs.data))
-        self.assertEqual(self.widget.info.text(), "No data.")
+        self.assertEqual(self.widget.infolabel.text(), "No data.")
 
         # Open a sample dataset
         self.open_dataset("iris")
@@ -182,12 +253,14 @@ class TestOWFile(WidgetTest):
             self.create_widget(OWFile, stored_settings={"recent_paths": []})
 
         widget.Outputs.data.send = Mock()
-        widget._try_load()
+        widget.load_data()
+        self.assertTrue(widget.Information.no_file_selected.is_shown())
         widget.Outputs.data.send.assert_called_with(None)
 
         widget.Outputs.data.send.reset_mock()
         widget.source = widget.URL
-        widget._try_load()
+        widget.load_data()
+        self.assertTrue(widget.Information.no_file_selected.is_shown())
         widget.Outputs.data.send.assert_called_with(None)
 
     def test_check_column_noname(self):
@@ -202,6 +275,13 @@ class TestOWFile(WidgetTest):
         self.assertEqual(self.widget.domain_editor.model().data(idx, Qt.DisplayRole), temp)
         self.widget.domain_editor.model().setData(idx, "", Qt.EditRole)
         self.assertEqual(self.widget.domain_editor.model().data(idx, Qt.DisplayRole), temp)
+
+    def test_invalid_role_mode(self):
+        self.open_dataset("iris")
+        model = self.widget.domain_editor.model()
+        idx = model.createIndex(1, 0)
+        self.assertFalse(model.setData(idx, Qt.StatusTipRole, ""))
+        self.assertIsNone(model.data(idx, Qt.StatusTipRole))
 
     def test_context_match_includes_variable_values(self):
         file1 = """\
@@ -285,14 +365,16 @@ a
         self.assertTrue(self.widget.Warning.load_warning.is_shown())
 
     def test_fail(self):
-        with named_file("name\nc\n\nstring", suffix=".tab") as fn:
+        with named_file("name\nc\n\nstring", suffix=".tab") as fn, \
+                patch("Orange.widgets.data.owfile.log.exception") as log:
             self.open_dataset(fn)
+            log.assert_called()
         self.assertTrue(self.widget.Error.unknown.is_shown())
 
     def test_read_format(self):
         iris = Table("iris")
 
-        def open_iris_with_no_spec_format(a, b, c, filters, e):
+        def open_iris_with_no_spec_format(_a, _b, _c, filters, _e):
             return iris.__file__, filters.split(";;")[0]
 
         with patch("AnyQt.QtWidgets.QFileDialog.getOpenFileName",
@@ -300,8 +382,9 @@ a
             self.widget.browse_file()
 
         self.assertIsNone(self.widget.recent_paths[0].file_format)
+        self.assertEqual(self.widget.reader_combo.currentText(), DEFAULT_READER_TEXT)
 
-        def open_iris_with_tab(a, b, c, filters, e):
+        def open_iris_with_tab(*_):
             return iris.__file__, format_filter(TabReader)
 
         with patch("AnyQt.QtWidgets.QFileDialog.getOpenFileName",
@@ -309,6 +392,7 @@ a
             self.widget.browse_file()
 
         self.assertEqual(self.widget.recent_paths[0].file_format, "Orange.data.io.TabReader")
+        self.assertTrue(self.widget.reader_combo.currentText().startswith("Tab-separated"))
 
     def test_no_specified_reader(self):
         with named_file("", suffix=".tab") as fn:
@@ -317,16 +401,69 @@ a
                                              stored_settings={"recent_paths": [no_class]})
             self.widget.load_data()
         self.assertTrue(self.widget.Error.missing_reader.is_shown())
+        self.assertEqual(self.widget.reader_combo.currentText(), "not.a.file.reader.class")
+
+    def test_select_reader(self):
+        filename = FileFormat.locate("iris.tab", dataset_dirs)
+
+        # a setting which adds a new qualified name to the reader combo
+        no_class = RecentPath(filename, None, None, file_format="not.a.file.reader.class")
+        self.widget = self.create_widget(OWFile,
+                                         stored_settings={"recent_paths": [no_class]})
+        self.widget.load_data()
+        len_with_qname = len(self.widget.reader_combo)
+        self.assertEqual(self.widget.reader_combo.currentText(), "not.a.file.reader.class")
+        self.assertEqual(self.widget.reader, None)
+
+        # select the last option, the same reader
+        self.widget.reader_combo.activated.emit(len_with_qname - 1)
+        self.assertEqual(len(self.widget.reader_combo), len_with_qname)
+        self.assertEqual(self.widget.reader_combo.currentText(), "not.a.file.reader.class")
+        self.assertEqual(self.widget.reader, None)
+
+        # select the tab reader
+        for i in range(len_with_qname):
+            text = self.widget.reader_combo.itemText(i)
+            if text.startswith("Tab-separated"):
+                break
+        self.widget.reader_combo.activated.emit(i)
+        self.assertEqual(len(self.widget.reader_combo), len_with_qname - 1)
+        self.assertTrue(self.widget.reader_combo.currentText().startswith("Tab-separated"))
+        self.assertIsInstance(self.widget.reader, TabReader)
+
+        # select the default reader
+        self.widget.reader_combo.activated.emit(0)
+        self.assertEqual(len(self.widget.reader_combo), len_with_qname - 1)
+        self.assertEqual(self.widget.reader_combo.currentText(), DEFAULT_READER_TEXT)
+        self.assertIsInstance(self.widget.reader, TabReader)
+
+    def test_select_reader_errors(self):
+        filename = FileFormat.locate("iris.tab", dataset_dirs)
+
+        no_class = RecentPath(filename, None, None, file_format="Orange.data.io.ExcelReader")
+        self.widget = self.create_widget(OWFile,
+                                         stored_settings={"recent_paths": [no_class]})
+        self.widget.load_data()
+        self.assertIn("Excel", self.widget.reader_combo.currentText())
+        self.assertTrue(self.widget.Error.unknown.is_shown())
+        self.assertFalse(self.widget.Error.missing_reader.is_shown())
+
+    def test_domain_edit_no_changes(self):
+        self.open_dataset("iris")
+        data = self.get_output(self.widget.Outputs.data)
+        # When no changes have been made in the domain editor,
+        # output data should be the same object (and not recreated)
+        self.assertTrue(data is self.widget.data)
 
     def test_domain_edit_on_sparse_data(self):
         iris = Table("iris").to_sparse()
 
-        f = tempfile.NamedTemporaryFile(suffix='.pickle', delete=False)
-        pickle.dump(iris, f)
-        f.close()
+        with named_file("", suffix='.pickle') as fn:
+            with open(fn, "wb") as f:
+                pickle.dump(iris, f)
 
-        self.widget.add_path(f.name)
-        self.widget.load_data()
+            self.widget.add_path(fn)
+            self.widget.load_data()
 
         output = self.get_output(self.widget.Outputs.data)
         self.assertIsInstance(output, Table)
@@ -341,7 +478,7 @@ a
         self.open_dataset("iris")
         data = self.get_output(self.widget.Outputs.data)
         self.assertTrue(len(data), 150)
-        self.assertTrue(len(data.domain), 5)
+        self.assertTrue(len(data.domain.variables), 5)
         for i in range(5):
             idx = self.widget.domain_editor.model().createIndex(i, 2)
             self.widget.domain_editor.model().setData(idx, "skip", Qt.EditRole)
@@ -357,7 +494,7 @@ a
         # test adding file formats after registering the widget
         called = False
         with named_file("", suffix=".tab") as filename:
-            def test_format(sd, sf, ff, **kwargs):
+            def test_format(_sd, _sf, ff, **_):
                 nonlocal called
                 called = True
                 self.assertIn(FailedSheetsFormat, ff)
@@ -465,9 +602,8 @@ a
         (i.e. sent by email), considering data file is stored in the same
         directory as the workflow.
         """
-        temp_file = tempfile.NamedTemporaryFile(dir=getcwd(), delete=False)
-        file_name = temp_file.name
-        temp_file.close()
+        with tempfile.NamedTemporaryFile(dir=getcwd(), delete=False) as temp_file:
+            file_name = temp_file.name
         base_name = path.basename(file_name)
         try:
             recent_path = RecentPath(
@@ -488,9 +624,8 @@ a
         """
         This test testes if paths are relocated correctly
         """
-        temp_file = tempfile.NamedTemporaryFile(dir=getcwd(), delete=False)
-        file_name = temp_file.name
-        temp_file.close()
+        with tempfile.NamedTemporaryFile(dir=getcwd(), delete=False) as temp_file:
+            file_name = temp_file.name
         base_name = path.basename(file_name)
         try:
             recent_path = RecentPath(
@@ -510,20 +645,90 @@ a
         finally:
             remove(file_name)
 
-    def test_relocate_recent_files_called(self):
-        """
-        This unittest check whether set_runtime_env which call
-        _relocate_recent_files_called scheme called before saving
-        """
-        window = CanvasMainWindow()
-        scheme = Scheme(title="A Scheme", description="A String\n")
-        self.runtime_called = False
+    def test_sheets(self):
+        # pylint: disable=protected-access
+        widget = self.widget
+        combo = widget.sheet_combo
+        widget.last_path = \
+            lambda: path.join(path.dirname(__file__), '..', "..", '..',
+                              'tests', 'xlsx_files', 'header_0_sheet.xlsx')
+        widget._try_load()
+        widget.reader.sheet = "my_sheet"
+        widget._select_active_sheet()
+        self.assertEqual(combo.itemText(0), "Sheet1")
+        self.assertEqual(combo.itemText(1), "my_sheet")
+        self.assertEqual(combo.itemText(2), "Sheet3")
+        self.assertEqual(combo.currentIndex(), 1)
 
-        def set_runtime_env(*args):
-            self.runtime_called = True
+        widget.reader.sheet = "no such sheet"
+        widget._select_active_sheet()
+        self.assertEqual(combo.currentIndex(), 0)
 
-        scheme.set_runtime_env = set_runtime_env
-        scheme.save_to = lambda *args, **kwargs: \
-            self.assertTrue(self.runtime_called)
+    @patch("os.path.exists", new=lambda _: True)
+    def test_warning_from_another_thread(self):
+        class AnotherWidget(QObject):
+            # This must be a method, not a staticmethod to run in the thread
+            def issue_warning(self):  # pylint: disable=no-self-use
+                time.sleep(0.1)
+                warnings.warn("warning from another thread")
+                warning_thread.quit()
 
-        window.save_scheme_to(scheme, "test.tmp")
+        def read():
+            warning_thread.start()
+            time.sleep(0.2)
+            return Table(TITANIC_PATH)
+
+        warning_thread = QThread()
+        another_widget = AnotherWidget()
+        another_widget.moveToThread(warning_thread)
+        warning_thread.started.connect(another_widget.issue_warning)
+
+        reader = Mock()
+        reader.read = read
+        self.widget._get_reader = lambda: reader
+        self.widget.last_path = lambda: "foo"
+        self.widget._update_sheet_combo = Mock()
+
+        # Warning must be caught by unit tests, but not the widget
+        with self.assertWarns(UserWarning):
+            self.widget._try_load()
+            self.assertFalse(self.widget.Warning.load_warning.is_shown())
+
+
+    @patch("os.path.exists", new=lambda _: True)
+    def test_warning_from_this_thread(self):
+        WARNING_MSG = "warning from this thread"
+
+        def read():
+            warnings.warn(WARNING_MSG)
+            return Table(TITANIC_PATH)
+
+        reader = Mock()
+        reader.read = read
+        self.widget._get_reader = lambda: reader
+        self.widget.last_path = lambda: "foo"
+        self.widget._update_sheet_combo = Mock()
+
+        self.widget._try_load()
+        self.assertTrue(self.widget.Warning.load_warning.is_shown())
+        self.assertIn(WARNING_MSG, str(self.widget.Warning.load_warning))
+
+
+class TestOWFileDropHandler(unittest.TestCase):
+    def test_canDropUrl(self):
+        handler = OWFileDropHandler()
+        self.assertTrue(handler.canDropUrl(QUrl("https://example.com/test.tab")))
+        self.assertTrue(handler.canDropUrl(QUrl.fromLocalFile("test.tab")))
+
+    def test_parametersFromUrl(self):
+        handler = OWFileDropHandler()
+        r = handler.parametersFromUrl(QUrl("https://example.com/test.tab"))
+        self.assertEqual(r["source"], OWFile.URL)
+        self.assertEqual(r["recent_urls"], ["https://example.com/test.tab"])
+        r = handler.parametersFromUrl(QUrl.fromLocalFile("test.tab"))
+        self.assertEqual(r["source"], OWFile.LOCAL_FILE)
+        self.assertEqual(r["recent_paths"][0].basename, "test.tab")
+
+
+if __name__ == "__main__":
+    unittest.main()

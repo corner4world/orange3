@@ -45,13 +45,14 @@ class OWAdaBoost(OWBaseLearner):
         no_weight_support = Msg('The base learner does not support weights.')
 
     def add_main_layout(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
         box = gui.widgetBox(self.controlArea, "Parameters")
         self.base_estimator = self.DEFAULT_BASE_ESTIMATOR
         self.base_label = gui.label(
             box, self, "Base estimator: " + self.base_estimator.name.title())
 
         self.n_estimators_spin = gui.spin(
-            box, self, "n_estimators", 1, 100, label="Number of estimators:",
+            box, self, "n_estimators", 1, 10000, label="Number of estimators:",
             alignment=Qt.AlignRight, controlWidth=80,
             callback=self.settings_changed)
         self.learning_rate_spin = gui.doubleSpin(
@@ -89,6 +90,8 @@ class OWAdaBoost(OWBaseLearner):
 
     @Inputs.learner
     def set_base_learner(self, learner):
+        # base_estimator is defined in add_main_layout
+        # pylint: disable=attribute-defined-outside-init
         self.Error.no_weight_support.clear()
         if learner and not learner.supports_weights:
             # Clear the error and reset to default base learner
@@ -99,8 +102,7 @@ class OWAdaBoost(OWBaseLearner):
             self.base_estimator = learner or self.DEFAULT_BASE_ESTIMATOR
             self.base_label.setText(
                 "Base estimator: %s" % self.base_estimator.name.title())
-        if self.auto_apply:
-            self.apply()
+        self.learner = self.model = None
 
     def get_learner_parameters(self):
         return (("Base estimator", self.base_estimator),

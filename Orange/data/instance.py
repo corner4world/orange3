@@ -4,7 +4,7 @@ from numbers import Real, Integral
 
 import numpy as np
 
-from Orange.data import Value, Unknown
+from Orange.data import Value, Unknown, DiscreteVariable
 
 __all__ = ["Instance"]
 
@@ -34,11 +34,12 @@ class Instance:
             self._weight = 1
         elif isinstance(data, Instance) and data.domain == domain:
             self._x = np.array(data._x)
-            self._y = np.array(data._y)
+            self._y = np.atleast_1d(np.array(data._y))
             self._metas = np.array(data._metas)
             self._weight = data._weight
         else:
             self._x, self._y, self._metas = domain.convert(data)
+            self._y = np.atleast_1d(self._y)
             self._weight = 1
 
         if id is not None:
@@ -112,15 +113,21 @@ class Instance:
             self._metas[-1 - key] = value
 
     def __getitem__(self, key):
-        if not isinstance(key, Integral):
-            key = self._domain.index(key)
-        if 0 <= key < len(self._domain.attributes):
-            value = self._x[key]
-        elif key >= len(self._domain.attributes):
-            value = self._y[key - len(self.domain.attributes)]
+        idx = key if isinstance(key, Integral) else self._domain.index(key)
+        if 0 <= idx < len(self._domain.attributes):
+            value = self._x[idx]
+        elif idx >= len(self._domain.attributes):
+            if self._y.ndim == 0:
+                value = self._y
+            else:
+                value = self._y[idx - len(self.domain.attributes)]
         else:
-            value = self._metas[-1 - key]
-        return Value(self._domain[key], value)
+            value = self._metas[-1 - idx]
+        var = self._domain[idx]
+        if isinstance(key, DiscreteVariable) and var is not key:
+            value = key.get_mapper_from(var)(value)
+            var = key
+        return Value(var, value)
 
     #TODO Should we return an instance of `object` if we have a meta attribute
     #     that is not Discrete or Continuous? E.g. when we have strings, we'd
@@ -173,6 +180,10 @@ class Instance:
                and all(m1 == m2 or
                        type(m1) == type(m2) == float and isnan(m1) and isnan(m2)
                        for m1, m2 in zip(self._metas, other._metas))
+
+    @classmethod
+    def __hash__(cls):
+        raise TypeError(f"unhashable type: '{type(cls.__name__)}'")
 
     def __iter__(self):
         return chain(iter(self._x), iter(self._y))

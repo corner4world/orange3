@@ -6,5 +6,8 @@ from .instance import *
 from .domain import *
 from .storage import *
 from .table import *
+from .io_util import *
 from .io import *
 from .filter import *
+from .pandas_compat import *
+from .aggregate import *

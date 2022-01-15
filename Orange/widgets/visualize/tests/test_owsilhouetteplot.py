@@ -6,11 +6,14 @@ import unittest
 
 import numpy as np
 
+import Orange.distance
 from Orange.data import (
     Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable)
+from Orange.misc import DistMatrix
 from Orange.widgets.utils.annotated_data import ANNOTATED_DATA_SIGNAL_NAME
 from Orange.widgets.visualize.owsilhouetteplot import OWSilhouettePlot
 from Orange.widgets.tests.base import WidgetTest, WidgetOutputsTestMixin
+from Orange.widgets.tests.utils import possible_duplicate_table
 
 
 class TestOWSilhouettePlot(WidgetTest, WidgetOutputsTestMixin):
@@ -18,6 +21,7 @@ class TestOWSilhouettePlot(WidgetTest, WidgetOutputsTestMixin):
     def setUpClass(cls):
         super().setUpClass()
         WidgetOutputsTestMixin.init(cls)
+        cls.same_input_output_domain = False
 
         cls.signal_name = "Data"
         cls.signal_data = cls.data
@@ -35,7 +39,6 @@ class TestOWSilhouettePlot(WidgetTest, WidgetOutputsTestMixin):
     def test_outputs_add_scores(self):
         # check output when appending scores
         self.send_signal(self.widget.Inputs.data, self.data)
-        self.widget.controls.add_scores.setChecked(1)
         selected_indices = self._select_data()
         selected = self.get_output(self.widget.Outputs.selected_data)
         annotated = self.get_output(self.widget.Outputs.annotated_data)
@@ -61,9 +64,9 @@ class TestOWSilhouettePlot(WidgetTest, WidgetOutputsTestMixin):
         self.assertTrue(self.widget.Error.singleton_clusters_all.is_shown())
 
     def test_unknowns_in_labels(self):
-        self.widget.controls.add_scores.setChecked(1)
         data = self.data[[0, 1, 2, 50, 51, 52, 100, 101, 102]]
-        data.Y[::3] = np.nan
+        with data.unlocked(data.Y):
+            data.Y[::3] = np.nan
         valid = ~np.isnan(data.Y.flatten())
         self.send_signal(self.widget.Inputs.data, data)
         output = self.get_output(ANNOTATED_DATA_SIGNAL_NAME)
@@ -81,12 +84,12 @@ class TestOWSilhouettePlot(WidgetTest, WidgetOutputsTestMixin):
         np.testing.assert_almost_equal(scores_1, scores[valid], decimal=12)
 
     def test_nan_distances(self):
-        self.widget.controls.add_scores.setChecked(1)
         self.widget.distance_idx = 2
         self.assertEqual(self.widget.Distances[self.widget.distance_idx][0],
                          'Cosine')
         data = self.data[[0, 1, 2, 50, 51, 52, 100, 101, 102]]
-        data.X[::3] = 0
+        with data.unlocked(data.X):
+            data.X[::3] = 0
         valid = np.any(data.X != 0, axis=1)
         self.assertFalse(self.widget.Warning.nan_distances.is_shown())
         self.send_signal(self.widget.Inputs.data, data)
@@ -106,7 +109,7 @@ class TestOWSilhouettePlot(WidgetTest, WidgetOutputsTestMixin):
         self.send_signal(self.widget.Inputs.data, data)
         self.assertTrue(self.widget.Warning.ignoring_categorical.is_shown())
         output = self.get_output(ANNOTATED_DATA_SIGNAL_NAME)
-        self.assertEqual(len(output.domain), len(data.domain))
+        self.assertEqual(len(output.domain.variables), len(data.domain.variables))
         self.widget.distance_idx = 0
         self.widget._update()
         self.assertFalse(self.widget.Warning.ignoring_categorical.is_shown())
@@ -146,14 +149,83 @@ class TestOWSilhouettePlot(WidgetTest, WidgetOutputsTestMixin):
         GH-2377
         """
         nan = np.NaN
-        table = Table(
+        table = Table.from_list(
             Domain(
                 [ContinuousVariable("a"), ContinuousVariable("b"), ContinuousVariable("c")],
-                [DiscreteVariable("d", values=["y", "n"])]),
+                [DiscreteVariable("d", values=("y", "n"))]),
             list(zip([4, nan, nan],
                      [15, nan, nan],
                      [16, nan, nan],
                      "nyy"))
         )
-        self.widget.controls.add_scores.setChecked(1)
         self.send_signal(self.widget.Inputs.data, table)
+
+    def test_saved_selection(self):
+        self.widget.settingsHandler.pack_data(self.widget)
+        # no assert here, just test is doesn't crash on empty
+
+        iris = Table("iris")
+
+        self.send_signal(self.widget.Inputs.data, iris)
+        random.seed(42)
+        points = random.sample(range(0, len(self.data)), 20)
+        self.widget._silplot.setSelection(points)
+        settings = self.widget.settingsHandler.pack_data(self.widget)
+
+        w = self.create_widget(OWSilhouettePlot, stored_settings=settings)
+        self.send_signal(w.Inputs.data, iris, widget=w)
+        self.assertEqual(len(self.get_output(w.Outputs.selected_data)), 20)
+
+    def test_distance_input(self):
+        widget = self.widget
+        data = Table("heart_disease")[::4]
+        matrix = Orange.distance.Euclidean(data)
+        self.send_signal(widget.Inputs.data, matrix, widget=widget)
+        self.assertIsNotNone(widget.distances)
+        self.assertIsNotNone(widget.data)
+        self.assertFalse(widget._distances_gui_box.isEnabled())
+
+        self.send_signal(widget.Inputs.data, data, widget=widget)
+        self.assertIsNone(widget.distances)
+        self.assertIsNotNone(widget.data)
+        self.assertTrue(widget._distances_gui_box.isEnabled())
+
+    def test_input_distance_no_data(self):
+        widget = self.widget
+        matrix = DistMatrix(
+            np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]]),
+            row_items=None
+        )
+        self.send_signal(widget.Inputs.data, matrix, widget=widget)
+        self.assertTrue(widget.Error.input_validation_error.is_shown())
+        self.assertIsNone(widget.data)
+        self.assertIsNone(widget.distances)
+        self.send_signal(widget.Inputs.data, None, widget=widget)
+        self.assertFalse(widget.Error.input_validation_error.is_shown())
+
+    def test_no_group_var(self):
+        widget = self.widget
+        data = Table("iris")[::4]
+        data = data[:, data.domain.attributes]
+        matrix = Orange.distance.Euclidean(data)
+        self.send_signal(widget.Inputs.data, matrix, widget=widget)
+
+        self.assertTrue(widget.Error.input_validation_error.is_shown())
+        self.assertIsNone(widget.data)
+        self.assertIsNone(widget.distances)
+
+        self.send_signal(widget.Inputs.data, None, widget=widget)
+        self.assertFalse(widget.Error.input_validation_error.is_shown())
+
+    def test_unique_output_domain(self):
+        widget = self.widget
+        data = possible_duplicate_table('Silhouette (iris)')
+        matrix = Orange.distance.Euclidean(data)
+        self.send_signal(widget.Inputs.data, matrix, widget=widget)
+
+        output = self.get_output(self.widget.Outputs.annotated_data)
+        self.assertEqual(output.domain.metas[0].name, 'Silhouette (iris) (1)')
+
+
+if __name__ == "__main__":
+    unittest.main()

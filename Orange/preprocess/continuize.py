@@ -4,12 +4,11 @@ from Orange.util import Reprable
 from Orange.preprocess.transformation import \
     Identity, Indicator, Indicator1, Normalizer
 from Orange.preprocess.preprocess import Continuize
-from Orange.preprocess.util import _RefuseDataInConstructor
 
 __all__ = ["DomainContinuizer"]
 
 
-class DomainContinuizer(_RefuseDataInConstructor, Reprable):
+class DomainContinuizer(Reprable):
     def __init__(self, zero_based=True,
                  multinomial_treatment=Continuize.Indicators,
                  transform_class=False):
@@ -47,7 +46,7 @@ class DomainContinuizer(_RefuseDataInConstructor, Reprable):
                 base = -1
             elif treat in (Continuize.FirstAsBase,
                            Continuize.RemoveMultinomial):
-                base = max(var.base_value, 0)
+                base = 0
             else:
                 base = dists[var_ptr].modus()
             ind_class = [Indicator1, Indicator][self.zero_based]

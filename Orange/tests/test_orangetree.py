@@ -9,6 +9,7 @@ import scipy.sparse as sp
 from Orange.data import Table, Domain, DiscreteVariable, ContinuousVariable
 from Orange.classification.tree import \
     TreeModel, Node, DiscreteNode, MappedDiscreteNode, NumericNode
+from Orange.tests import test_filename
 
 
 class TestTree:
@@ -148,7 +149,7 @@ class TestTree:
                          ContinuousVariable("r3")],
                         self.class_var)
 
-        data = Table(domain)
+        data = Table.from_domain(domain)
         tree = clf(data)
         self.assertIsInstance(tree.root, Node)
         np.testing.assert_almost_equal(tree.predict(np.array([[0., 0., 0.]])),
@@ -225,12 +226,12 @@ class TestRegressor(TestTree, unittest.TestCase):
         unittest.TestCase.setUpClass()
         TestTree.setUpClass()
 
-        cls.data = Table('housing')
-        imports = Table("imports-85")
+        cls.data = Table("housing")
+        imports = Table(test_filename("datasets/imports-85.tab"))
         new_domain = Domain([attr for attr in imports.domain.attributes
                              if attr.is_continuous or len(attr.values) <= 16],
                             imports.domain.class_var)
-        cls.data_mixed = Table(new_domain, imports)
+        cls.data_mixed = imports.transform(new_domain)
 
         cls.class_var = ContinuousVariable("y")
         cls.blind_prediction = 0
@@ -367,7 +368,7 @@ class TestTreeModel(unittest.TestCase):
         a = DiscreteVariable("d4", "ab")
         y = ContinuousVariable("ey")
         domain = Domain([a], y)
-        data = Table(domain)
+        data = Table.from_domain(domain)
         values = np.array([[42., 43], [44, 45]])
         root = DiscreteNode(a, 0, values[1])
         root.children = [Node(None, -1, values[0]), None]
@@ -394,11 +395,11 @@ class TestTreeModel(unittest.TestCase):
 
     def test_print(self):
         model = TreeModel(self.data, self.root)
-        self.assertEqual(model.print_tree(), """             [ 1 42] v1 ≤ 13.000
+        self.assertEqual(model.print_tree(), """             [ 1 42] v1 ≤ 13
              [ 2 42]     v2 a
              [ 3 42]     v2 b
              [ 4 42]     v2 c
-             [ 5 42] v1 > 13.000
+             [ 5 42] v1 > 13
              [ 6 42]     v3 f
              [ 7 42]     v3 d or e
 """)

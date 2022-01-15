@@ -1,5 +1,7 @@
 # Test methods with long descriptive names can omit docstrings
-# pylint: disable=missing-docstring
+# pylint: disable=missing-docstring,unsubscriptable-object
+import unittest
+
 from Orange.data import Table
 from Orange.widgets.data.owdatasampler import OWDataSampler
 from Orange.widgets.tests.base import WidgetTest
@@ -25,7 +27,7 @@ class TestOWDataSampler(WidgetTest):
         self.assertTrue(self.widget.Error.too_many_folds.is_shown())
         self.send_signal("Data", None)
         self.assertFalse(self.widget.Error.too_many_folds.is_shown())
-        self.send_signal("Data", Table(self.iris.domain))
+        self.send_signal("Data", Table.from_domain(self.iris.domain))
         self.assertTrue(self.widget.Error.no_data.is_shown())
 
     def test_stratified_on_unbalanced_data(self):
@@ -63,8 +65,8 @@ class TestOWDataSampler(WidgetTest):
 
     def test_no_intersection_in_outputs(self):
         """ Check whether outputs intersect and whether length of outputs sums
-        to length of original data """
-        self.send_signal("Data", self.zoo)
+        to length of original data"""
+        self.send_signal("Data", self.iris)
         w = self.widget
         sampling_types = [w.FixedProportion, w.FixedSize, w.CrossValidation]
 
@@ -78,7 +80,7 @@ class TestOWDataSampler(WidgetTest):
 
                     sample = self.get_output("Data Sample")
                     other = self.get_output("Remaining Data")
-                    self.assertEqual(len(self.zoo), len(sample) + len(other))
+                    self.assertEqual(len(self.iris), len(sample) + len(other))
                     self.assertNoIntersection(sample, other)
 
     def test_bigger_size_with_replacement(self):
@@ -100,6 +102,22 @@ class TestOWDataSampler(WidgetTest):
         self.set_fixed_sample_size(3, with_replacement=True)
         self.assertTrue(self.widget.Warning.bigger_sample.is_shown())
 
+    def test_shuffling(self):
+        self.send_signal('Data', self.iris)
+
+        self.set_fixed_sample_size(150)
+        self.assertFalse(self.widget.Warning.bigger_sample.is_shown())
+        sample = self.get_output("Data Sample")
+        self.assertTrue((self.iris.ids != sample.ids).any())
+        self.assertEqual(set(self.iris.ids), set(sample.ids))
+
+        self.select_sampling_type(self.widget.FixedProportion)
+        self.widget.sampleSizePercentage = 100
+        self.widget.commit()
+        sample = self.get_output("Data Sample")
+        self.assertTrue((self.iris.ids != sample.ids).any())
+        self.assertEqual(set(self.iris.ids), set(sample.ids))
+
     def set_fixed_sample_size(self, sample_size, with_replacement=False):
         """Set fixed sample size and return the number of gui spin.
 
@@ -114,5 +132,77 @@ class TestOWDataSampler(WidgetTest):
         return self.widget.sampleSizeSpin.value()
 
     def assertNoIntersection(self, sample, other):
-        for inst in sample:
-            self.assertNotIn(inst, other)
+        self.assertFalse(bool(set(sample.ids) & set(other.ids)))
+
+    def test_cv_outputs(self):
+        w = self.widget
+        self.send_signal(w.Inputs.data, self.iris)
+
+        self.select_sampling_type(w.CrossValidation)
+        self.widget.commit()
+        self.assertEqual(len(self.get_output(w.Outputs.data_sample)), 135)
+        self.assertEqual(len(self.get_output(w.Outputs.remaining_data)), 15)
+
+    def test_cv_output_migration(self):
+        self.assertFalse(self.widget.compatibility_mode)
+
+        settings = {"sampling_type": OWDataSampler.CrossValidation}
+        OWDataSampler.migrate_settings(settings, version=2)
+        self.assertFalse(settings.get("compatibility_mode", False))
+
+        settings = {"sampling_type": OWDataSampler.FixedProportion}
+        OWDataSampler.migrate_settings(settings, version=1)
+        self.assertFalse(settings.get("compatibility_mode", False))
+
+        settings = {"sampling_type": OWDataSampler.CrossValidation}
+        OWDataSampler.migrate_settings(settings, version=1)
+        self.assertTrue(settings["compatibility_mode"])
+
+        w = self.create_widget(
+            OWDataSampler,
+            stored_settings={"sampling_type": OWDataSampler.CrossValidation,
+                             "__version__": 1})
+        self.assertTrue(w.compatibility_mode)
+
+        self.send_signal(w.Inputs.data, self.iris)
+        self.select_sampling_type(w.CrossValidation)
+        w.commit()
+        self.assertEqual(len(self.get_output(w.Outputs.data_sample)), 15)
+        self.assertEqual(len(self.get_output(w.Outputs.remaining_data)), 135)
+
+    def test_send_report(self):
+        w = self.widget
+        self.send_signal(w.Inputs.data, self.iris)
+
+        w.stratify = True
+        w.use_seed = True
+
+        self.select_sampling_type(0)
+        w.commit()
+        w.send_report()
+
+        self.select_sampling_type(1)
+        w.sampleSizeNumber = 1
+        w.commit()
+        w.send_report()
+
+        w.sampleSizeNumber = 10
+        w.replacement = False
+        w.commit()
+        w.send_report()
+
+        w.replacement = True
+        w.commit()
+        w.send_report()
+
+        self.select_sampling_type(2)
+        w.commit()
+        w.send_report()
+
+        self.select_sampling_type(3)
+        w.commit()
+        w.send_report()
+
+
+if __name__ == "__main__":
+    unittest.main()

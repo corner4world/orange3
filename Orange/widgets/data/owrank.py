@@ -1,43 +1,38 @@
-"""
-Rank
-====
-
-Rank (score) features for prediction.
-
-"""
-
-from collections import namedtuple, OrderedDict
 import logging
+import warnings
+from collections import namedtuple
 from functools import partial
 from itertools import chain
+from types import SimpleNamespace
+from typing import Any, Callable, List, Tuple
 
 import numpy as np
+from AnyQt.QtCore import (
+    QItemSelection, QItemSelectionModel, QItemSelectionRange, Qt,
+    pyqtSignal as Signal
+)
+from AnyQt.QtWidgets import (
+    QButtonGroup, QCheckBox, QGridLayout, QHeaderView, QItemDelegate,
+    QRadioButton, QStackedWidget, QTableView
+)
+from orangewidget.settings import IncompatibleContext
 from scipy.sparse import issparse
 
-from AnyQt.QtGui import QFontMetrics
-from AnyQt.QtWidgets import (
-    QTableView, QRadioButton, QButtonGroup, QGridLayout,
-    QStackedWidget, QHeaderView, QCheckBox, QItemDelegate,
+from Orange.data import (
+    ContinuousVariable, DiscreteVariable, Domain, StringVariable, Table
 )
-from AnyQt.QtCore import (
-    Qt, QItemSelection, QItemSelectionRange, QItemSelectionModel,
-)
-
-from Orange.data import (Table, Domain, ContinuousVariable, DiscreteVariable,
-                         StringVariable)
-from Orange.misc.cache import memoize_method
+from Orange.data.util import get_unique_names_duplicates
 from Orange.preprocess import score
-from Orange.widgets import report
-from Orange.widgets import gui
-from Orange.widgets.settings import (DomainContextHandler, Setting,
-                                     ContextSetting)
+from Orange.widgets import gui, report
+from Orange.widgets.settings import (
+    ContextSetting, DomainContextHandler, Setting
+)
+from Orange.widgets.unsupervised.owdistances import InterruptException
+from Orange.widgets.utils.concurrent import ConcurrentWidgetMixin, TaskState
 from Orange.widgets.utils.itemmodels import PyTableModel
 from Orange.widgets.utils.sql import check_sql_input
 from Orange.widgets.utils.widgetpreview import WidgetPreview
-from Orange.widgets.widget import (
-    OWWidget, Msg, Input, Output, AttributeList
-)
-
+from Orange.widgets.widget import AttributeList, Input, MultiInput, Output, Msg, OWWidget
 
 log = logging.getLogger(__name__)
 
@@ -78,8 +73,12 @@ REG_SCORES = [
 ]
 SCORES = CLS_SCORES + REG_SCORES
 
+VARNAME_COL, NVAL_COL = range(2)
+
 
 class TableView(QTableView):
+    manualSelection = Signal()
+
     def __init__(self, parent=None, **kwargs):
         super().__init__(parent=parent,
                          selectionBehavior=QTableView.SelectRows,
@@ -89,14 +88,12 @@ class TableView(QTableView):
                          cornerButtonEnabled=False,
                          alternatingRowColors=False,
                          **kwargs)
-        self.setItemDelegate(gui.ColoredBarItemDelegate(self))
-        self.setItemDelegateForColumn(0, QItemDelegate())
-
-        header = self.verticalHeader()
-        header.setSectionResizeMode(header.Fixed)
-        header.setFixedWidth(50)
-        header.setDefaultSectionSize(22)
-        header.setTextElideMode(Qt.ElideMiddle)  # Note: https://bugreports.qt.io/browse/QTBUG-62091
+        # setItemDelegate(ForColumn) doesn't take ownership of delegates
+        self._bar_delegate = gui.ColoredBarItemDelegate(self)
+        self._del0, self._del1 = QItemDelegate(), QItemDelegate()
+        self.setItemDelegate(self._bar_delegate)
+        self.setItemDelegateForColumn(VARNAME_COL, self._del0)
+        self.setItemDelegateForColumn(NVAL_COL, self._del1)
 
         header = self.horizontalHeader()
         header.setSectionResizeMode(header.Fixed)
@@ -104,10 +101,9 @@ class TableView(QTableView):
         header.setDefaultSectionSize(80)
         header.setTextElideMode(Qt.ElideMiddle)
 
-    def setVHeaderFixedWidthFromLabel(self, max_label):
-        header = self.verticalHeader()
-        width = QFontMetrics(header.font()).width(max_label)
-        header.setFixedWidth(min(width + 40, 400))
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.manualSelection.emit()
 
 
 class TableModel(PyTableModel):
@@ -115,7 +111,7 @@ class TableModel(PyTableModel):
         super().__init__(*args, **kwargs)
         self._extremes = {}
 
-    def data(self, index, role=Qt.DisplayRole, _isnan=np.isnan):
+    def data(self, index, role=Qt.DisplayRole):
         if role == gui.BarRatioRole and index.isValid():
             value = super().data(index, Qt.EditRole)
             if not isinstance(value, float):
@@ -124,26 +120,30 @@ class TableModel(PyTableModel):
             value = (value - vmin) / ((vmax - vmin) or 1)
             return value
 
-        if role == Qt.DisplayRole:
+        if role == Qt.DisplayRole and index.column() != VARNAME_COL:
             role = Qt.EditRole
 
         value = super().data(index, role)
 
-        # Display nothing for non-existent attr value counts in the first column
-        if role == Qt.EditRole and index.column() == 0 and _isnan(value):
+        # Display nothing for non-existent attr value counts in column 1
+        if role == Qt.EditRole \
+                and index.column() == NVAL_COL and np.isnan(value):
             return ''
 
         return value
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.InitialSortOrderRole:
-            return Qt.DescendingOrder
+            return Qt.DescendingOrder if section > 0 else Qt.AscendingOrder
         return super().headerData(section, orientation, role)
 
     def setExtremesFrom(self, column, values):
         """Set extremes for columnn's ratio bars from values"""
         try:
-            vmin = np.nanmin(values)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", ".*All-NaN slice encountered.*", RuntimeWarning)
+                vmin = np.nanmin(values)
             if np.isnan(vmin):
                 raise TypeError
         except TypeError:
@@ -153,6 +153,7 @@ class TableModel(PyTableModel):
         self._extremes[column] = (vmin, vmax)
 
     def resetSorting(self, yes_reset=False):
+        # pylint: disable=arguments-differ
         """We don't want to invalidate our sort proxy model everytime we
         wrap a new list. Our proxymodel only invalidates explicitly
         (i.e. when new data is set)"""
@@ -160,14 +161,90 @@ class TableModel(PyTableModel):
             super().resetSorting()
 
     def _argsortData(self, data, order):
-        """Always sort NaNs last"""
+        if data.dtype not in (float, int):
+            data = np.char.lower(data)
         indices = np.argsort(data, kind='mergesort')
         if order == Qt.DescendingOrder:
-            return np.roll(indices[::-1], -np.isnan(data).sum())
+            indices = indices[::-1]
+            if data.dtype == float:
+                # Always sort NaNs last
+                return np.roll(indices, -np.isnan(data).sum())
         return indices
 
 
-class OWRank(OWWidget):
+class Results(SimpleNamespace):
+    method_scores: Tuple[ScoreMeta, np.ndarray] = None
+    scorer_scores: Tuple[ScoreMeta, Tuple[np.ndarray, List[str]]] = None
+
+
+def get_method_scores(data: Table, method: ScoreMeta) -> np.ndarray:
+    estimator = method.scorer()
+    # The widget handles infs and nans.
+    # Any errors in scorers need to be detected elsewhere.
+    with np.errstate(all="ignore"):
+        try:
+            scores = np.asarray(estimator(data))
+        except ValueError:
+            try:
+                scores = np.array(
+                    [estimator(data, attr) for attr in data.domain.attributes]
+                )
+            except ValueError:
+                log.error("%s doesn't work on this data", method.name)
+                scores = np.full(len(data.domain.attributes), np.nan)
+            else:
+                log.warning(
+                    "%s had to be computed separately for each " "variable",
+                    method.name,
+                )
+        return scores
+
+
+def get_scorer_scores(
+    data: Table, scorer: ScoreMeta
+) -> Tuple[np.ndarray, Tuple[str]]:
+    try:
+        scores = scorer.scorer.score_data(data).T
+    except (ValueError, TypeError):
+        log.error("%s doesn't work on this data", scorer.name)
+        scores = np.full((len(data.domain.attributes), 1), np.nan)
+
+    labels = (
+        (scorer.shortname,)
+        if scores.shape[1] == 1
+        else tuple(
+            scorer.shortname + "_" + str(i)
+            for i in range(1, 1 + scores.shape[1])
+        )
+    )
+    return scores, labels
+
+
+def run(
+    data: Table,
+    methods: List[ScoreMeta],
+    scorers: List[ScoreMeta],
+    state: TaskState,
+) -> Results:
+    progress_steps = iter(np.linspace(0, 100, len(methods) + len(scorers)))
+
+    def call_with_cb(get_scores: Callable, method: ScoreMeta):
+        scores = get_scores(data, method)
+        state.set_progress_value(next(progress_steps))
+        if state.is_interruption_requested():
+            raise InterruptException
+        return scores
+
+    method_scores = tuple(
+        (method, call_with_cb(get_method_scores, method)) for method in methods
+    )
+    scorer_scores = tuple(
+        (scorer, call_with_cb(get_scorer_scores, scorer)) for scorer in scorers
+    )
+    return Results(method_scores=method_scores, scorer_scores=scorer_scores)
+
+
+class OWRank(OWWidget, ConcurrentWidgetMixin):
     name = "Rank"
     description = "Rank and filter data features by their relevance."
     icon = "icons/Rank.svg"
@@ -178,7 +255,7 @@ class OWRank(OWWidget):
 
     class Inputs:
         data = Input("Data", Table)
-        scorer = Input("Scorer", score.Scorer, multiple=True)
+        scorer = MultiInput("Scorer", score.Scorer, filter_none=True)
 
     class Outputs:
         reduced_data = Output("Reduced Data", Table, default=True)
@@ -193,15 +270,13 @@ class OWRank(OWWidget):
     sorting = Setting((0, Qt.DescendingOrder))
     selected_methods = Setting(set())
 
-    settings_version = 2
+    settings_version = 3
     settingsHandler = DomainContextHandler()
-    selected_rows = ContextSetting([])
+    selected_attrs = ContextSetting([], schema_only=True)
     selectionMethod = ContextSetting(SelectNBest)
 
     class Information(OWWidget.Information):
-        no_target_var = Msg("Data does not have a single target variable. "
-                            "You can still connect in unsupervised scorers "
-                            "such as PCA.")
+        no_target_var = Msg("Data does not have a (single) target variable.")
         missings_imputed = Msg('Missing values will be imputed as needed.')
 
     class Error(OWWidget.Error):
@@ -209,30 +284,38 @@ class OWRank(OWWidget):
         inadequate_learner = Msg("Scorer {} inadequate: {}")
         no_attributes = Msg("Data does not have a single attribute.")
 
+    class Warning(OWWidget.Warning):
+        renamed_variables = Msg(
+            "Variables with duplicated names have been renamed.")
+
     def __init__(self):
-        super().__init__()
-        self.scorers = OrderedDict()
+        OWWidget.__init__(self)
+        ConcurrentWidgetMixin.__init__(self)
+        self.scorers: List[ScoreMeta] = []
         self.out_domain_desc = None
         self.data = None
         self.problem_type_mode = ProblemType.CLASSIFICATION
+
+        # results caches
+        self.scorers_results = {}
+        self.methods_results = {}
 
         if not self.selected_methods:
             self.selected_methods = {method.name for method in SCORES
                                      if method.is_default}
 
         # GUI
-
         self.ranksModel = model = TableModel(parent=self)  # type: TableModel
         self.ranksView = view = TableView(self)            # type: TableView
         self.mainArea.layout().addWidget(view)
         view.setModel(model)
-        view.setColumnWidth(0, 30)
+        view.setColumnWidth(NVAL_COL, 30)
         view.selectionModel().selectionChanged.connect(self.on_select)
 
         def _set_select_manual():
             self.setSelectionMethod(OWRank.SelectManual)
 
-        view.pressed.connect(_set_select_manual)
+        view.manualSelection.connect(_set_select_manual)
         view.verticalHeader().sectionClicked.connect(_set_select_manual)
         view.horizontalHeader().sectionClicked.connect(self.headerClick)
 
@@ -253,12 +336,14 @@ class OWRank(OWWidget):
             gui.rubber(box)
 
         gui.rubber(self.controlArea)
+
         self.switchProblemType(ProblemType.CLASSIFICATION)
 
-        selMethBox = gui.vBox(self.controlArea, "Select Attributes", addSpace=True)
+        selMethBox = gui.vBox(self.buttonsArea, "Select Attributes")
 
         grid = QGridLayout()
-        grid.setContentsMargins(6, 0, 6, 0)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
         self.selectButtons = QButtonGroup()
         self.selectButtons.buttonClicked[int].connect(self.setSelectionMethod)
 
@@ -274,8 +359,9 @@ class OWRank(OWWidget):
         b3 = button(self.tr("Manual"), OWRank.SelectManual)
         b4 = button(self.tr("Best ranked:"), OWRank.SelectNBest)
 
-        s = gui.spin(selMethBox, self, "nSelected", 1, 100,
-                     callback=lambda: self.setSelectionMethod(OWRank.SelectNBest))
+        s = gui.spin(selMethBox, self, "nSelected", 1, 999,
+                     callback=lambda: self.setSelectionMethod(OWRank.SelectNBest),
+                     addToLayout=False)
 
         grid.addWidget(b1, 0, 0)
         grid.addWidget(b2, 1, 0)
@@ -287,7 +373,7 @@ class OWRank(OWWidget):
 
         selMethBox.layout().addLayout(grid)
 
-        gui.auto_commit(selMethBox, self, "auto_apply", "Send", box=False)
+        gui.auto_send(self.buttonsArea, self, "auto_apply")
 
         self.resize(690, 500)
 
@@ -302,26 +388,26 @@ class OWRank(OWWidget):
     @check_sql_input
     def set_data(self, data):
         self.closeContext()
-        self.selected_rows = []
+        self.selected_attrs = []
         self.ranksModel.clear()
         self.ranksModel.resetSorting(True)
 
-        self.get_method_scores.cache_clear()
-        self.get_scorer_scores.cache_clear()
+        self.scorers_results = {}
+        self.methods_results = {}
+        self.cancel()
 
         self.Error.clear()
         self.Information.clear()
         self.Information.missings_imputed(
             shown=data is not None and data.has_missing())
 
-        if data is not None and not len(data.domain.attributes):
+        if data is not None and not data.domain.attributes:
             data = None
             self.Error.no_attributes()
         self.data = data
         self.switchProblemType(ProblemType.CLASSIFICATION)
         if self.data is not None:
             domain = self.data.domain
-
             if domain.has_discrete_class:
                 problem_type = ProblemType.CLASSIFICATION
             elif domain.has_continuous_class:
@@ -337,10 +423,6 @@ class OWRank(OWWidget):
             if problem_type is not None:
                 self.switchProblemType(problem_type)
 
-            self.ranksModel.setVerticalHeaderLabels(domain.attributes)
-            self.ranksView.setVHeaderFixedWidthFromLabel(
-                max((a.name for a in domain.attributes), key=len))
-
             self.selectionMethod = OWRank.SelectNBest
 
         self.openContext(data)
@@ -348,121 +430,135 @@ class OWRank(OWWidget):
 
     def handleNewSignals(self):
         self.setStatusMessage('Running')
-        self.updateScores()
+        self.update_scores()
         self.setStatusMessage('')
         self.on_select()
 
     @Inputs.scorer
-    def set_learner(self, scorer, id):
-        if scorer is None:
-            self.scorers.pop(id, None)
-        else:
-            # Avoid caching a (possibly stale) previous instance of the same
-            # Scorer passed via the same signal
-            if id in self.scorers:
-                self.get_scorer_scores.cache_clear()
+    def set_learner(self, index, scorer):
+        self.scorers[index] = ScoreMeta(
+            scorer.name, scorer.name, scorer,
+            ProblemType.from_variable(scorer.class_type),
+            False
+        )
+        self.scorers_results = {}
 
-            self.scorers[id] = ScoreMeta(scorer.name, scorer.name, scorer,
-                                         ProblemType.from_variable(scorer.class_type),
-                                         False)
+    @Inputs.scorer.insert
+    def insert_learner(self, index: int, scorer):
+        self.scorers.insert(index, ScoreMeta(
+            scorer.name, scorer.name, scorer,
+            ProblemType.from_variable(scorer.class_type),
+            False
+        ))
+        self.scorers_results = {}
 
-    @memoize_method()
-    def get_method_scores(self, method):
-        estimator = method.scorer()
-        data = self.data
-        try:
-            scores = np.asarray(estimator(data))
-        except ValueError:
-            log.warning("Scorer %s wasn't able to compute all scores at once",
-                        method.name)
-            try:
-                scores = np.array([estimator(data, attr)
-                                   for attr in data.domain.attributes])
-            except ValueError:
-                log.error(
-                    "Scorer %s wasn't able to compute scores at all",
-                    method.name)
-                scores = np.full(len(data.domain.attributes), np.nan)
-        return scores
+    @Inputs.scorer.remove
+    def remove_learner(self, index):
+        self.scorers.pop(index)
+        self.scorers_results = {}
 
-    @memoize_method()
-    def get_scorer_scores(self, scorer):
-        try:
-            scores = scorer.scorer.score_data(self.data).T
-        except ValueError:
-            log.error(
-                "Scorer %s wasn't able to compute scores at all",
-                scorer.name)
-            scores = np.full((len(self.data.domain.attributes), 1), np.nan)
+    def _get_methods(self):
+        return [
+            method
+            for method in SCORES
+            if (
+                method.name in self.selected_methods
+                and method.problem_type == self.problem_type_mode
+                and (
+                    not issparse(self.data.X)
+                    or method.scorer.supports_sparse_data
+                )
+            )
+        ]
 
-        labels = ((scorer.shortname,)
-                  if scores.shape[1] == 1 else
-                  tuple(scorer.shortname + '_' + str(i)
-                        for i in range(1, 1 + scores.shape[1])))
-        return scores, labels
+    def _get_scorers(self):
+        scorers = []
+        for scorer in self.scorers:
+            if scorer.problem_type in (
+                self.problem_type_mode,
+                ProblemType.UNSUPERVISED,
+            ):
+                scorers.append(scorer)
+            else:
+                self.Error.inadequate_learner(
+                    scorer.name, scorer.learner_adequacy_err_msg
+                )
+        return scorers
 
-    def updateScores(self):
+    def update_scores(self):
         if self.data is None:
             self.ranksModel.clear()
             self.Outputs.scores.send(None)
             return
 
-        methods = [method
-                   for method in SCORES
-                   if (method.name in self.selected_methods and
-                       method.problem_type == self.problem_type_mode and
-                       (not issparse(self.data.X) or
-                        method.scorer.supports_sparse_data))]
-
-        scorers = []
         self.Error.inadequate_learner.clear()
-        for scorer in self.scorers.values():
-            if scorer.problem_type in (self.problem_type_mode, ProblemType.UNSUPERVISED):
-                scorers.append(scorer)
-            else:
-                self.Error.inadequate_learner(scorer.name, scorer.learner_adequacy_err_msg)
 
-        method_scores = tuple(self.get_method_scores(method)
-                              for method in methods)
+        scorers = [
+            s for s in self._get_scorers() if s not in self.scorers_results
+        ]
+        methods = [
+            m for m in self._get_methods() if m not in self.methods_results
+        ]
+        self.start(run, self.data, methods, scorers)
 
-        scorer_scores, scorer_labels = (), ()
-        if scorers:
-            scorer_scores, scorer_labels = zip(*(self.get_scorer_scores(scorer)
-                                                 for scorer in scorers))
-            scorer_labels = tuple(chain.from_iterable(scorer_labels))
+    def on_done(self, result: Results) -> None:
+        self.methods_results.update(result.method_scores)
+        self.scorers_results.update(result.scorer_scores)
 
-        labels = tuple(method.shortname for method in methods) + scorer_labels
+        methods = self._get_methods()
+        method_labels = tuple(m.shortname for m in methods)
+        method_scores = tuple(self.methods_results[m] for m in methods)
+
+        scores = [self.scorers_results[s] for s in self._get_scorers()]
+        scorer_scores, scorer_labels = zip(*scores) if scores else ((), ())
+
+        labels = method_labels + tuple(chain.from_iterable(scorer_labels))
         model_array = np.column_stack(
-            ([len(a.values) if a.is_discrete else np.nan
-              for a in self.data.domain.attributes],) +
-            (method_scores if method_scores else ()) +
-            (scorer_scores if scorer_scores else ())
+            (list(self.data.domain.attributes), )
+            + (
+                [float(len(a.values)) if a.is_discrete else np.nan
+                 for a in self.data.domain.attributes],
+            )
+            + method_scores
+            + scorer_scores
         )
-        for column, values in enumerate(model_array.T):
+        for column, values in enumerate(model_array.T[2:].astype(float),
+                                        start=2):
             self.ranksModel.setExtremesFrom(column, values)
 
         self.ranksModel.wrap(model_array.tolist())
-        self.ranksModel.setHorizontalHeaderLabels(('#',) + labels)
-        self.ranksView.setColumnWidth(0, 40)
+        self.ranksModel.setHorizontalHeaderLabels(('', '#',) + labels)
+        self.ranksView.setColumnWidth(NVAL_COL, 40)
+        self.ranksView.resizeColumnToContents(VARNAME_COL)
 
         # Re-apply sort
         try:
             sort_column, sort_order = self.sorting
             if sort_column < len(labels):
-                # adds 1 for '#' (discrete count) column
-                self.ranksModel.sort(sort_column + 1, sort_order)
-                self.ranksView.horizontalHeader().setSortIndicator(sort_column + 1, sort_order)
+                # adds 2 to skip the first two columns
+                self.ranksModel.sort(sort_column + 2, sort_order)
+                self.ranksView.horizontalHeader().setSortIndicator(
+                    sort_column + 2, sort_order
+                )
         except ValueError:
             pass
 
         self.autoSelection()
         self.Outputs.scores.send(self.create_scores_table(labels))
 
+    def on_exception(self, ex: Exception) -> None:
+        raise ex
+
+    def on_partial_result(self, result: Any) -> None:
+        pass
+
     def on_select(self):
         # Save indices of attributes in the original, unsorted domain
-        self.selected_rows = self.ranksModel.mapToSourceRows([
-            i.row() for i in self.ranksView.selectionModel().selectedRows(0)])
-        self.commit()
+        selected_rows = self.ranksView.selectionModel().selectedRows(0)
+        row_indices = [i.row() for i in selected_rows]
+        attr_indices = self.ranksModel.mapToSourceRows(row_indices)
+        self.selected_attrs = [self.data.domain[idx] for idx in attr_indices]
+        self.commit.deferred()
 
     def setSelectionMethod(self, method):
         self.selectionMethod = method
@@ -490,21 +586,23 @@ class OWRank(OWWidget):
             )
         else:
             selection = QItemSelection()
-            if len(self.selected_rows):
-                for row in model.mapFromSourceRows(self.selected_rows):
+            if self.selected_attrs is not None:
+                attr_indices = [self.data.domain.attributes.index(var)
+                                for var in self.selected_attrs]
+                for row in model.mapFromSourceRows(attr_indices):
                     selection.append(QItemSelectionRange(
                         model.index(row, 0), model.index(row, columnCount - 1)))
 
         selModel.select(selection, QItemSelectionModel.ClearAndSelect)
 
     def headerClick(self, index):
-        if index >= 1 and self.selectionMethod == OWRank.SelectNBest:
+        if index >= 2 and self.selectionMethod == OWRank.SelectNBest:
             # Reselect the top ranked attributes
             self.autoSelection()
 
         # Store the header states
         sort_order = self.ranksModel.sortOrder()
-        sort_column = self.ranksModel.sortColumn() - 1  # -1 for '#' (discrete count) column
+        sort_column = self.ranksModel.sortColumn() - 2  # -2 for '#' (discrete count) column
         self.sorting = (sort_column, sort_order)
 
     def methodSelectionChanged(self, state, method_name):
@@ -513,7 +611,7 @@ class OWRank(OWWidget):
         elif method_name in self.selected_methods:
             self.selected_methods.remove(method_name)
 
-        self.updateScores()
+        self.update_scores()
 
     def send_report(self):
         if not self.data:
@@ -523,34 +621,37 @@ class OWRank(OWWidget):
         if self.out_domain_desc is not None:
             self.report_items("Output", self.out_domain_desc)
 
+    @gui.deferred
     def commit(self):
-        selected_attrs = []
-        if self.data is not None:
-            selected_attrs = [self.data.domain.attributes[i]
-                              for i in self.selected_rows]
-        if not selected_attrs:
+        if not self.selected_attrs:
             self.Outputs.reduced_data.send(None)
             self.Outputs.features.send(None)
             self.out_domain_desc = None
         else:
             reduced_domain = Domain(
-                selected_attrs, self.data.domain.class_var, self.data.domain.metas)
+                self.selected_attrs, self.data.domain.class_var,
+                self.data.domain.metas)
             data = self.data.transform(reduced_domain)
             self.Outputs.reduced_data.send(data)
-            self.Outputs.features.send(AttributeList(selected_attrs))
+            self.Outputs.features.send(AttributeList(self.selected_attrs))
             self.out_domain_desc = report.describe_domain(data.domain)
 
     def create_scores_table(self, labels):
+        self.Warning.renamed_variables.clear()
         model_list = self.ranksModel.tolist()
-        if not model_list or len(model_list[0]) == 1:  # Empty or just n_values column
+        if not model_list or len(model_list[0]) == 2:  # Empty or just first two columns
             return None
+        unique, renamed = get_unique_names_duplicates(labels + ('Feature',),
+                                                      return_duplicated=True)
+        if renamed:
+            self.Warning.renamed_variables(', '.join(renamed))
 
-        domain = Domain([ContinuousVariable(label) for label in labels],
-                        metas=[StringVariable("Feature")])
+        domain = Domain([ContinuousVariable(label) for label in unique[:-1]],
+                        metas=[StringVariable(unique[-1])])
 
         # Prevent np.inf scores
         finfo = np.finfo(np.float64)
-        scores = np.clip(np.array(model_list)[:, 1:], finfo.min, finfo.max)
+        scores = np.clip(np.array(model_list)[:, 2:], finfo.min, finfo.max)
 
         feature_names = np.array([a.name for a in self.data.domain.attributes])
         # Reshape to 2d array as Table does not like 1d arrays
@@ -580,11 +681,10 @@ class OWRank(OWWidget):
 
     @classmethod
     def migrate_context(cls, context, version):
-        if version is None or version < 2:
-            # Old selection was saved as sorted indices. New selection is original indices.
-            # Since we can't devise the latter without first computing the ranks,
-            # just reset the selection to avoid confusion.
-            context.values['selected_rows'] = []
+        if version is None or version < 3:
+            # Selections were stored as indices, so these contexts matched
+            # any domain. The only safe thing to do is to remove them.
+            raise IncompatibleContext
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -595,8 +695,9 @@ if __name__ == "__main__":  # pragma: no cover
         set_learner=(RandomForestLearner(), (3, 'Learner', None)))
     previewer.run()
 
+    # pylint: disable=pointless-string-statement
     """
     WidgetPreview(OWRank).run(
         set_learner=(RandomForestLearner(), (3, 'Learner', None)),
         set_data=Table("heart_disease.tab"))
-"""
+    """

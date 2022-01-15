@@ -3,52 +3,69 @@
 import os
 import sys
 import subprocess
-from setuptools import find_packages, Command
+from setuptools import setup, find_packages, Command
+
+from distutils.command import install_data, sdist
+from distutils.command.build_ext import build_ext
+from distutils.command import config, build
+from distutils.core import Extension
 
 if sys.version_info < (3, 4):
     sys.exit('Orange requires Python >= 3.4')
 
 try:
-    from numpy.distutils.core import setup
+    import numpy
     have_numpy = True
 except ImportError:
-    from setuptools import setup
     have_numpy = False
 
-
 try:
+    # need sphinx and recommonmark for build_htmlhelp command
     from sphinx.setup_command import BuildDoc
+    # pylint: disable=unused-import
+    import recommonmark
     have_sphinx = True
 except ImportError:
     have_sphinx = False
 
-from distutils.command.build_ext import build_ext
-from distutils.command import install_data, sdist, config, build
+try:
+    from Cython.Distutils.build_ext import new_build_ext as build_ext
+    have_cython = True
+except ImportError:
+    have_cython = False
 
+try:
+    import PyQt5.QtCore  # pylint: disable=unused-import
+    have_pyqt5 = True
+except ImportError:
+    have_pyqt5 = False
+
+is_conda = os.path.exists(os.path.join(sys.prefix, 'conda-meta'))
 
 NAME = 'Orange3'
 
-VERSION = '3.20.0'
+VERSION = '3.32.0'
 ISRELEASED = False
 # full version identifier including a git revision identifier for development
 # build/releases (this is filled/updated in `write_version_py`)
 FULLVERSION = VERSION
 
 DESCRIPTION = 'Orange, a component-based data mining framework.'
-README_FILE = os.path.join(os.path.dirname(__file__), 'README.md')
+README_FILE = os.path.join(os.path.dirname(__file__), 'README.pypi')
 LONG_DESCRIPTION = open(README_FILE).read()
+LONG_DESCRIPTION_CONTENT_TYPE = 'text/markdown'
 AUTHOR = 'Bioinformatics Laboratory, FRI UL'
 AUTHOR_EMAIL = 'info@biolab.si'
 URL = 'http://orange.biolab.si/'
 LICENSE = 'GPLv3+'
 
-KEYWORDS = (
+KEYWORDS = [
     'data mining',
     'machine learning',
     'artificial intelligence',
-)
+]
 
-CLASSIFIERS = (
+CLASSIFIERS = [
     'Development Status :: 4 - Beta',
     'Environment :: X11 Applications :: Qt',
     'Environment :: Console',
@@ -64,9 +81,15 @@ CLASSIFIERS = (
     'Intended Audience :: Education',
     'Intended Audience :: Science/Research',
     'Intended Audience :: Developers',
-)
+]
 
 requirements = ['requirements-core.txt', 'requirements-gui.txt']
+
+# pyqt5 is named pyqt5 on pypi and pyqt on conda
+# due to possible conflicts, skip the pyqt5 requirement in conda environments
+# that already have pyqt
+if not (is_conda and have_pyqt5):
+    requirements.append('requirements-pyqt.txt')
 
 INSTALL_REQUIRES = sorted(set(
     line.partition('#')[0].strip()
@@ -76,13 +99,20 @@ INSTALL_REQUIRES = sorted(set(
 ) - {''})
 
 
-EXTRAS_REQUIRE = {
-    ':python_version<="3.4"': ["typing"],
-}
+EXTRAS_REQUIRE = {}
 
 ENTRY_POINTS = {
+    "orange.widgets": (
+        "Orange Widgets = Orange.widgets",
+    ),
     "orange.canvas.help": (
         "html-index = Orange.widgets:WIDGET_HELP_PATH",
+    ),
+    "orange.canvas.drophandler": (
+        "File = Orange.widgets.data.owfile:OWFileDropHandler",
+        "Load Model = Orange.widgets.model.owloadmodel:OWLoadModelDropHandler",
+        "Distance File = Orange.widgets.unsupervised.owdistancefile:OWDistanceFileDropHandler",
+        "Python Script = Orange.widgets.data.owpythonscript:OWPythonScriptDropHandler",
     ),
     "gui_scripts": (
         "orange-canvas = Orange.canvas.__main__:main",
@@ -159,25 +189,7 @@ if not release:
         a.close()
 
 
-def configuration(parent_package='', top_path=None):
-    if os.path.exists('MANIFEST'):
-        os.remove('MANIFEST')
-
-    from numpy.distutils.misc_util import Configuration
-    config = Configuration(None, parent_package, top_path)
-
-    # Avoid non-useful msg:
-    # "Ignoring attempt to set 'name' (from ... "
-    config.set_options(ignore_setup_xxx_py=True,
-                       assume_default_configuration=True,
-                       delegate_options_to_subpackages=True,
-                       quiet=True)
-
-    config.add_subpackage('Orange')
-    return config
-
-
-PACKAGES = find_packages()
+PACKAGES = find_packages(include=("Orange*",))
 
 # Extra non .py, .{so,pyd} files that are installed within the package dir
 # hierarchy
@@ -185,8 +197,7 @@ PACKAGE_DATA = {
     "Orange": ["datasets/*.{}".format(ext)
                for ext in ["tab", "csv", "basket", "info", "dst", "metadata"]],
     "Orange.canvas": ["icons/*.png", "icons/*.svg"],
-    "Orange.canvas.styles": ["*.qss", "orange/*.svg"],
-    "Orange.canvas.application.workflows": ["*.ows"],
+    "Orange.canvas.workflows": ["*.ows"],
     "Orange.widgets": ["icons/*.png",
                        "icons/*.svg"],
     "Orange.widgets.report": ["icons/*.svg", "*.html"],
@@ -196,13 +207,17 @@ PACKAGE_DATA = {
                             "icons/paintdata/*.png",
                             "icons/paintdata/*.svg"],
     "Orange.widgets.data.tests": ["origin1/*.tab",
-                                  "origin2/*.tab"],
+                                  "origin2/*.tab",
+                                  "*.txt", "*.tab"],
     "Orange.widgets.evaluate": ["icons/*.svg"],
     "Orange.widgets.model": ["icons/*.svg"],
     "Orange.widgets.visualize": ["icons/*.svg"],
     "Orange.widgets.unsupervised": ["icons/*.svg"],
     "Orange.widgets.utils": ["_webview/*.js"],
-    "Orange.tests": ["xlsx_files/*.xlsx", "*.tab", "*.basket", "*.csv"]
+    "Orange.tests": ["xlsx_files/*.xlsx", "datasets/*.tab",
+                     "xlsx_files/*.xls",
+                     "datasets/*.basket", "datasets/*.csv",
+                     "datasets/*.pkl", "datasets/*.pkl.gz"]
 }
 
 
@@ -220,7 +235,7 @@ class LintCommand(Command):
                     awk '/[@\/]github.com[:\/]biolab\/orange3[\. ]/{ print $1; exit }')"
         git fetch -q $upstream master
         best_ancestor=$(git merge-base HEAD refs/remotes/$upstream/master)
-        .travis/check_pylint_diff $best_ancestor
+        .github/workflows/check_pylint_diff.sh $best_ancestor
         ''', shell=True, cwd=os.path.dirname(os.path.abspath(__file__))))
 
 class CoverageCommand(Command):
@@ -234,6 +249,7 @@ class CoverageCommand(Command):
         sys.exit(subprocess.call(r'''
         coverage run --source=Orange -m unittest -v Orange.tests
         echo; echo
+        coverage combine
         coverage report
         coverage html &&
             { echo; echo "See also: file://$(pwd)/htmlcov/index.html"; echo; }
@@ -243,7 +259,8 @@ class CoverageCommand(Command):
 class build_ext_error(build_ext):
     def initialize_options(self):
         raise SystemExit(
-            "Cannot compile extensions. numpy is required to build Orange."
+            "Cannot compile extensions. numpy and cython are required to "
+            "build Orange."
         )
 
 
@@ -415,6 +432,46 @@ else:
             self.distribution.data_files.extend(files)
 
 
+def ext_modules():
+    includes = []
+    libraries = []
+    if have_numpy:
+        includes.append(numpy.get_include())
+
+    if os.name == 'posix':
+        libraries.append("m")
+
+    return [
+        # Cython extensions. Will be automatically cythonized.
+        Extension(
+            "*",
+            ["Orange/*/*.pyx"],
+            include_dirs=includes,
+            libraries=libraries,
+        ),
+        Extension(
+            "Orange.classification._simple_tree",
+            sources=[
+                "Orange/classification/_simple_tree.c",
+            ],
+            include_dirs=includes,
+            libraries=libraries,
+            export_symbols=[
+                "build_tree", "destroy_tree", "new_node",
+                "predict_classification", "predict_regression"
+            ]
+        ),
+        Extension(
+            "Orange.widgets.utils._grid_density",
+            sources=["Orange/widgets/utils/_grid_density.cpp"],
+            language="c++",
+            include_dirs=includes,
+            libraries=libraries,
+            export_symbols=["compute_density"],
+        ),
+    ]
+
+
 def setup_package():
     write_version_py()
     cmdclass = {
@@ -428,10 +485,9 @@ def setup_package():
         # numpy.distutils insist all data files are installed in site-packages
         'install_data': install_data.install_data
     }
-    if have_numpy:
-        extra_args = {
-            "configuration": configuration
-        }
+    if have_numpy and have_cython:
+        extra_args = {}
+        cmdclass["build_ext"] = build_ext
     else:
         # substitute a build_ext command with one that raises an error when
         # building. In order to fully support `pip install` we need to
@@ -445,6 +501,7 @@ def setup_package():
         version=FULLVERSION,
         description=DESCRIPTION,
         long_description=LONG_DESCRIPTION,
+        long_description_content_type=LONG_DESCRIPTION_CONTENT_TYPE,
         author=AUTHOR,
         author_email=AUTHOR_EMAIL,
         url=URL,
@@ -452,6 +509,7 @@ def setup_package():
         keywords=KEYWORDS,
         classifiers=CLASSIFIERS,
         packages=PACKAGES,
+        ext_modules=ext_modules(),
         package_data=PACKAGE_DATA,
         data_files=DATA_FILES,
         install_requires=INSTALL_REQUIRES,

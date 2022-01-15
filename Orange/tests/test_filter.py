@@ -11,6 +11,7 @@ from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable
 from Orange.data.filter import \
     FilterContinuous, FilterDiscrete, FilterString, Values, HasClass, \
     IsDefined, SameValue, Random, ValueFilter, FilterStringList, FilterRegex
+from Orange.tests import test_filename
 
 NIMOCK = MagicMock(side_effect=NotImplementedError())
 
@@ -40,7 +41,7 @@ class TestFilterValues(unittest.TestCase):
 
 class TestIsDefinedFilter(unittest.TestCase):
     def setUp(self):
-        self.table = Table('imports-85')
+        self.table = Table(test_filename('datasets/imports-85.tab'))
         self.n_missing = 46
         self.assertTrue(self.table.has_missing())
 
@@ -75,7 +76,7 @@ class TestIsDefinedFilter(unittest.TestCase):
 
 class TestHasClassFilter(unittest.TestCase):
     def setUp(self):
-        self.table = Table('imports-85')
+        self.table = Table(test_filename('datasets/imports-85.tab'))
         self.n_missing = 4
         self.assertTrue(self.table.has_missing_class())
 
@@ -95,10 +96,10 @@ class TestHasClassFilter(unittest.TestCase):
         domain = Domain([DiscreteVariable("x", values="01")],
                         [DiscreteVariable("y1", values="01"),
                          DiscreteVariable("y2", values="01")])
-        table = Table(domain, [[0, 1, np.nan],
-                               [1, np.nan, 0],
-                               [1, 0, 1],
-                               [1, np.nan, np.nan]])
+        table = Table.from_list(domain, [[0, 1, np.nan],
+                                         [1, np.nan, 0],
+                                         [1, 0, 1],
+                                         [1, np.nan, np.nan]])
         table = HasClass()(table)
         self.assertTrue(not np.isnan(table).any())
         self.assertEqual(table.domain, domain)
@@ -355,10 +356,12 @@ class TestFilterString(unittest.TestCase):
         flt = FilterString("name", FilterString.IsDefined)
         self.assertTrue(flt(self.inst))
         for s in ["?", "nan"]:
-            self.inst["name"] = s
+            with self.data.unlocked():
+                self.inst["name"] = s
             flt = FilterString("name", FilterString.IsDefined)
             self.assertTrue(flt(self.inst))
-        self.inst["name"] = ""
+            with self.data.unlocked():
+                self.inst["name"] = ""
         flt = FilterString("name", FilterString.IsDefined)
         self.assertFalse(flt(self.inst))
 
@@ -457,6 +460,5 @@ class TestFilterReprs(unittest.TestCase):
 
         for f in filters:
             repr_str = repr(f)
-            print(repr_str)
             new_f = eval(repr_str)
             self.assertEqual(repr(new_f), repr_str)

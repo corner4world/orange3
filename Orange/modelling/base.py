@@ -41,8 +41,8 @@ class Fitter(Learner):
             X, Y, W = data.X, data.Y, data.W if data.has_weights() else None
             return learner.fit(X, Y, W)
 
-    def preprocess(self, data):
-        return self.get_learner(data).preprocess(data)
+    def preprocess(self, data, progress_callback=None):
+        return self.get_learner(data).preprocess(data, progress_callback)
 
     def get_learner(self, problem_type):
         """Get the learner for a given problem type.
@@ -124,6 +124,6 @@ class Fitter(Learner):
 class SklFitter(Fitter):
     def _fit_model(self, data):
         model = super()._fit_model(data)
-        model.used_vals = [np.unique(y) for y in data.Y[:, None].T]
+        model.used_vals = [np.unique(y).astype(int) for y in data.Y[:, None].T]
         model.params = self.get_params(data)
         return model

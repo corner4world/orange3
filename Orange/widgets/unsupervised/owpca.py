@@ -1,35 +1,23 @@
 import numbers
 
-from AnyQt.QtWidgets import QFormLayout, QLineEdit
-from AnyQt.QtGui import QColor
-from AnyQt.QtCore import Qt, QTimer
-
 import numpy
-import pyqtgraph as pg
+from AnyQt.QtWidgets import QFormLayout
+from AnyQt.QtCore import Qt
 
 from Orange.data import Table, Domain, StringVariable, ContinuousVariable
+from Orange.data.util import get_unique_names
 from Orange.data.sql.table import SqlTable, AUTO_DL_LIMIT
-from Orange.preprocess import Normalize
-from Orange.preprocess.preprocess import Preprocess, ApplyDomain
-from Orange.projection import PCA, TruncatedSVD
+from Orange.preprocess import preprocess
+from Orange.projection import PCA
 from Orange.widgets import widget, gui, settings
+from Orange.widgets.utils.slidergraph import SliderGraph
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 from Orange.widgets.widget import Input, Output
-
-try:
-    from orangecontrib import remote
-    remotely = True
-except ImportError:
-    remotely = False
 
 
 # Maximum number of PCA components that we can set in the widget
 MAX_COMPONENTS = 100
-
-DECOMPOSITIONS = [
-    PCA,
-    TruncatedSVD
-]
+LINE_NAMES = ["component variance", "cumulative variance"]
 
 
 class OWPCA(widget.OWWidget):
@@ -43,21 +31,15 @@ class OWPCA(widget.OWWidget):
         data = Input("Data", Table)
 
     class Outputs:
-        transformed_data = Output("Transformed data", Table)
+        transformed_data = Output("Transformed Data", Table, replaces=["Transformed data"])
+        data = Output("Data", Table, default=True)
         components = Output("Components", Table)
         pca = Output("PCA", PCA, dynamic=False)
-        preprocessor = Output("Preprocessor", Preprocess)
-
-    settingsHandler = settings.DomainContextHandler()
 
     ncomponents = settings.Setting(2)
     variance_covered = settings.Setting(100)
-    batch_size = settings.Setting(100)
-    address = settings.Setting('')
-    auto_update = settings.Setting(True)
     auto_commit = settings.Setting(True)
-    normalize = settings.ContextSetting(True)
-    decomposition_idx = settings.ContextSetting(0)
+    normalize = settings.Setting(True)
     maxp = settings.Setting(20)
     axis_labels = settings.Setting(10)
 
@@ -71,7 +53,6 @@ class OWPCA(widget.OWWidget):
     class Error(widget.OWWidget.Error):
         no_features = widget.Msg("At least 1 feature is required")
         no_instances = widget.Msg("At least 1 data instance is required")
-        sparse_data = widget.Msg("Sparse data is not supported")
 
     def __init__(self):
         super().__init__()
@@ -81,71 +62,36 @@ class OWPCA(widget.OWWidget):
         self._transformed = None
         self._variance_ratio = None
         self._cumulative = None
-        self._line = False
         self._init_projector()
 
         # Components Selection
-        box = gui.vBox(self.controlArea, "Components Selection")
         form = QFormLayout()
-        box.layout().addLayout(form)
+        box = gui.widgetBox(self.controlArea, "Components Selection",
+                            orientation=form)
 
         self.components_spin = gui.spin(
             box, self, "ncomponents", 1, MAX_COMPONENTS,
             callback=self._update_selection_component_spin,
-            keyboardTracking=False
+            keyboardTracking=False, addToLayout=False
         )
         self.components_spin.setSpecialValueText("All")
 
         self.variance_spin = gui.spin(
             box, self, "variance_covered", 1, 100,
             callback=self._update_selection_variance_spin,
-            keyboardTracking=False
+            keyboardTracking=False, addToLayout=False
         )
         self.variance_spin.setSuffix("%")
 
         form.addRow("Components:", self.components_spin)
-        form.addRow("Variance covered:", self.variance_spin)
-
-        # Incremental learning
-        self.sampling_box = gui.vBox(self.controlArea, "Incremental learning")
-        self.addresstext = QLineEdit(box)
-        self.addresstext.setPlaceholderText('Remote server')
-        if self.address:
-            self.addresstext.setText(self.address)
-        self.sampling_box.layout().addWidget(self.addresstext)
-
-        form = QFormLayout()
-        self.sampling_box.layout().addLayout(form)
-        self.batch_spin = gui.spin(
-            self.sampling_box, self, "batch_size", 50, 100000, step=50,
-            keyboardTracking=False)
-        form.addRow("Batch size ~ ", self.batch_spin)
-
-        self.start_button = gui.button(
-            self.sampling_box, self, "Start remote computation",
-            callback=self.start, autoDefault=False,
-            tooltip="Start/abort computation on the server")
-        self.start_button.setEnabled(False)
-
-        gui.checkBox(self.sampling_box, self, "auto_update",
-                     "Periodically fetch model", callback=self.update_model)
-        self.__timer = QTimer(self, interval=2000)
-        self.__timer.timeout.connect(self.get_model)
-
-        self.sampling_box.setVisible(remotely)
-
-        # Decomposition
-        self.decomposition_box = gui.radioButtons(
-            self.controlArea, self,
-            "decomposition_idx", [d.name for d in DECOMPOSITIONS],
-            box="Decomposition", callback=self._update_decomposition
-        )
+        form.addRow("Explained variance:", self.variance_spin)
 
         # Options
         self.options_box = gui.vBox(self.controlArea, "Options")
         self.normalize_box = gui.checkBox(
             self.options_box, self, "normalize",
-            "Normalize data", callback=self._update_normalize
+            "Normalize variables", callback=self._update_normalize,
+            attribute=Qt.WA_LayoutUsesWidgetRect
         )
 
         self.maxp_spin = gui.spin(
@@ -154,103 +100,44 @@ class OWPCA(widget.OWWidget):
             keyboardTracking=False
         )
 
-        self.controlArea.layout().addStretch()
+        gui.rubber(self.controlArea)
 
-        gui.auto_commit(self.controlArea, self, "auto_commit", "Apply",
-                        checkbox_label="Apply automatically")
+        gui.auto_apply(self.buttonsArea, self, "auto_commit")
 
-        self.plot = pg.PlotWidget(background="w")
-
-        axis = self.plot.getAxis("bottom")
-        axis.setLabel("Principal Components")
-        axis = self.plot.getAxis("left")
-        axis.setLabel("Proportion of variance")
-        self.plot_horlabels = []
-        self.plot_horlines = []
-
-        self.plot.getViewBox().setMenuEnabled(False)
-        self.plot.getViewBox().setMouseEnabled(False, False)
-        self.plot.showGrid(True, True, alpha=0.5)
-        self.plot.setRange(xRange=(0.0, 1.0), yRange=(0.0, 1.0))
+        self.plot = SliderGraph(
+            "Principal Components", "Proportion of variance",
+            self._on_cut_changed)
 
         self.mainArea.layout().addWidget(self.plot)
         self._update_normalize()
 
-    def update_model(self):
-        self.get_model()
-        if self.auto_update and self.rpca and not self.rpca.ready():
-            self.__timer.start(2000)
-        else:
-            self.__timer.stop()
-
-    def update_buttons(self, sparse_data=False):
-        if sparse_data:
-            self.normalize = False
-
-        buttons = self.decomposition_box.buttons
-        for cls, button in zip(DECOMPOSITIONS, buttons):
-            button.setDisabled(sparse_data and not cls.supports_sparse)
-
-        if not buttons[self.decomposition_idx].isEnabled():
-            # Set decomposition index to first sparse-enabled decomposition
-            for i, cls in enumerate(DECOMPOSITIONS):
-                if cls.supports_sparse:
-                    self.decomposition_idx = i
-                    break
-
-        self._init_projector()
-
-    def start(self):
-        if 'Abort' in self.start_button.text():
-            self.rpca.abort()
-            self.__timer.stop()
-            self.start_button.setText("Start remote computation")
-        else:
-            self.address = self.addresstext.text()
-            with remote.server(self.address):
-                from Orange.projection.pca import RemotePCA
-                maxiter = (1e5 + self.data.approx_len()) / self.batch_size * 3
-                self.rpca = RemotePCA(self.data, self.batch_size, int(maxiter))
-            self.update_model()
-            self.start_button.setText("Abort remote computation")
-
     @Inputs.data
     def set_data(self, data):
-        self.closeContext()
         self.clear_messages()
         self.clear()
-        self.start_button.setEnabled(False)
         self.information()
         self.data = None
+        if not data:
+            self.clear_outputs()
         if isinstance(data, SqlTable):
             if data.approx_len() < AUTO_DL_LIMIT:
                 data = Table(data)
-            elif not remotely:
+            else:
                 self.information("Data has been sampled")
                 data_sample = data.sample_time(1, no_cache=True)
                 data_sample.download_data(2000, partial=True)
                 data = Table(data_sample)
-            else:       # data was big and remote available
-                self.sampling_box.setVisible(True)
-                self.start_button.setText("Start remote computation")
-                self.start_button.setEnabled(True)
-        if not isinstance(data, SqlTable):
-            self.sampling_box.setVisible(False)
-
         if isinstance(data, Table):
-            if len(data.domain.attributes) == 0:
+            if not data.domain.attributes:
                 self.Error.no_features()
                 self.clear_outputs()
                 return
-            if len(data) == 0:
+            if not data:
                 self.Error.no_instances()
                 self.clear_outputs()
                 return
 
-        self.openContext(data)
-        sparse_data = data is not None and data.is_sparse()
-        self.normalize_box.setDisabled(sparse_data)
-        self.update_buttons(sparse_data=sparse_data)
+        self._init_projector()
 
         self.data = data
         self.fit()
@@ -260,9 +147,15 @@ class OWPCA(widget.OWWidget):
         self.Warning.trivial_components.clear()
         if self.data is None:
             return
+
         data = self.data
-        self._pca_projector.preprocessors = \
-            self._pca_preprocessors + ([Normalize()] if self.normalize else [])
+
+        if self.normalize:
+            self._pca_projector.preprocessors = \
+                self._pca_preprocessors + [preprocess.Normalize(center=False)]
+        else:
+            self._pca_projector.preprocessors = self._pca_preprocessors
+
         if not isinstance(data, SqlTable):
             pca = self._pca_projector(data)
             variance_ratio = pca.explained_variance_ratio_
@@ -277,107 +170,49 @@ class OWPCA(widget.OWWidget):
             else:
                 self.Warning.trivial_components()
 
-            self.unconditional_commit()
+            self.commit.now()
 
     def clear(self):
         self._pca = None
         self._transformed = None
         self._variance_ratio = None
         self._cumulative = None
-        self._line = None
-        self.plot_horlabels = []
-        self.plot_horlines = []
-        self.plot.clear()
+        self.plot.clear_plot()
 
     def clear_outputs(self):
         self.Outputs.transformed_data.send(None)
+        self.Outputs.data.send(None)
         self.Outputs.components.send(None)
         self.Outputs.pca.send(self._pca_projector)
-        self.Outputs.preprocessor.send(None)
-
-    def get_model(self):
-        if self.rpca is None:
-            return
-        if self.rpca.ready():
-            self.__timer.stop()
-            self.start_button.setText("Restart (finished)")
-        self._pca = self.rpca.get_state()
-        if self._pca is None:
-            return
-        self._variance_ratio = self._pca.explained_variance_ratio_
-        self._cumulative = numpy.cumsum(self._variance_ratio)
-        self._setup_plot()
-        self._transformed = None
-        self.commit()
 
     def _setup_plot(self):
-        self.plot.clear()
         if self._pca is None:
+            self.plot.clear_plot()
             return
 
         explained_ratio = self._variance_ratio
         explained = self._cumulative
+        cutpos = self._nselected_components()
         p = min(len(self._variance_ratio), self.maxp)
 
-        self.plot.plot(numpy.arange(p), explained_ratio[:p],
-                       pen=pg.mkPen(QColor(Qt.red), width=2),
-                       antialias=True,
-                       name="Variance")
-        self.plot.plot(numpy.arange(p), explained[:p],
-                       pen=pg.mkPen(QColor(Qt.darkYellow), width=2),
-                       antialias=True,
-                       name="Cumulative Variance")
+        self.plot.update(
+            numpy.arange(1, p+1), [explained_ratio[:p], explained[:p]],
+            [Qt.red, Qt.darkYellow], cutpoint_x=cutpos, names=LINE_NAMES)
 
-        cutpos = self._nselected_components() - 1
-        self._line = pg.InfiniteLine(
-            angle=90, pos=cutpos, movable=True, bounds=(0, p - 1))
-        self._line.setCursor(Qt.SizeHorCursor)
-        self._line.setPen(pg.mkPen(QColor(Qt.black), width=2))
-        self._line.sigPositionChanged.connect(self._on_cut_changed)
-        self.plot.addItem(self._line)
-
-        self.plot_horlines = (
-            pg.PlotCurveItem(pen=pg.mkPen(QColor(Qt.blue), style=Qt.DashLine)),
-            pg.PlotCurveItem(pen=pg.mkPen(QColor(Qt.blue), style=Qt.DashLine)))
-        self.plot_horlabels = (
-            pg.TextItem(color=QColor(Qt.black), anchor=(1, 0)),
-            pg.TextItem(color=QColor(Qt.black), anchor=(1, 1)))
-        for item in self.plot_horlabels + self.plot_horlines:
-            self.plot.addItem(item)
-        self._set_horline_pos()
-
-        self.plot.setRange(xRange=(0.0, p - 1), yRange=(0.0, 1.0))
         self._update_axis()
 
-    def _set_horline_pos(self):
-        cutidx = self.ncomponents - 1
-        for line, label, curve in zip(self.plot_horlines, self.plot_horlabels,
-                                      (self._variance_ratio, self._cumulative)):
-            y = curve[cutidx]
-            line.setData([-1, cutidx], 2 * [y])
-            label.setPos(cutidx, y)
-            label.setPlainText("{:.3f}".format(y))
+    def _on_cut_changed(self, components):
+        if components == self.ncomponents \
+                or self.ncomponents == 0:
+            return
 
-    def _on_cut_changed(self, line):
-        # cut changed by means of a cut line over the scree plot.
-        value = int(round(line.value()))
-        self._line.setValue(value)
-        current = self._nselected_components()
-        components = value + 1
-
-        if not (self.ncomponents == 0 and
-                components == len(self._variance_ratio)):
-            self.ncomponents = components
-
-        self._set_horline_pos()
-
+        self.ncomponents = components
         if self._pca is not None:
             var = self._cumulative[components - 1]
             if numpy.isfinite(var):
                 self.variance_covered = int(var * 100)
 
-        if current != self._nselected_components():
-            self._invalidate_selection()
+        self._invalidate_selection()
 
     def _update_selection_component_spin(self):
         # cut changed by "ncomponents" spin.
@@ -395,9 +230,7 @@ class OWPCA(widget.OWWidget):
         if numpy.isfinite(var):
             self.variance_covered = int(var * 100)
 
-        if numpy.floor(self._line.value()) + 1 != cut:
-            self._line.setValue(cut - 1)
-
+        self.plot.set_cut_point(cut)
         self._invalidate_selection()
 
     def _update_selection_variance_spin(self):
@@ -409,8 +242,7 @@ class OWPCA(widget.OWWidget):
                                  self.variance_covered / 100.0) + 1
         cut = min(cut, len(self._cumulative))
         self.ncomponents = cut
-        if numpy.floor(self._line.value()) + 1 != cut:
-            self._line.setValue(cut - 1)
+        self.plot.set_cut_point(cut)
         self._invalidate_selection()
 
     def _update_normalize(self):
@@ -419,14 +251,9 @@ class OWPCA(widget.OWWidget):
             self._invalidate_selection()
 
     def _init_projector(self):
-        cls = DECOMPOSITIONS[self.decomposition_idx]
-        self._pca_projector = cls(n_components=MAX_COMPONENTS)
+        self._pca_projector = PCA(n_components=MAX_COMPONENTS, random_state=0)
         self._pca_projector.component = self.ncomponents
-        self._pca_preprocessors = cls.preprocessors
-
-    def _update_decomposition(self):
-        self._init_projector()
-        self._update_normalize()
+        self._pca_preprocessors = PCA.preprocessors
 
     def _nselected_components(self):
         """Return the number of selected components."""
@@ -450,52 +277,76 @@ class OWPCA(widget.OWWidget):
         return cut
 
     def _invalidate_selection(self):
-        self.commit()
+        self.commit.deferred()
 
     def _update_axis(self):
         p = min(len(self._variance_ratio), self.maxp)
         axis = self.plot.getAxis("bottom")
         d = max((p-1)//(self.axis_labels-1), 1)
-        axis.setTicks([[(i, str(i+1)) for i in range(0, p, d)]])
+        axis.setTicks([[(i, str(i)) for i in range(1, p + 1, d)]])
 
+    @gui.deferred
     def commit(self):
-        transformed = components = pp = None
+        transformed = data = components = None
         if self._pca is not None:
             if self._transformed is None:
-                # Compute the full transform (MAX_COMPONENTS components) only once.
+                # Compute the full transform (MAX_COMPONENTS components) once.
                 self._transformed = self._pca(self.data)
             transformed = self._transformed
 
+            if self._variance_ratio is not None:
+                for var, explvar in zip(
+                        transformed.domain.attributes,
+                        self._variance_ratio[:self.ncomponents]):
+                    var.attributes["variance"] = round(explvar, 6)
             domain = Domain(
                 transformed.domain.attributes[:self.ncomponents],
                 self.data.domain.class_vars,
                 self.data.domain.metas
             )
             transformed = transformed.from_table(domain, transformed)
+
             # prevent caching new features by defining compute_value
-            dom = Domain([ContinuousVariable(a.name, compute_value=lambda _: None)
-                          for a in self._pca.orig_domain.attributes],
-                         metas=[StringVariable(name='component')])
+            proposed = [a.name for a in self._pca.orig_domain.attributes]
+            meta_name = get_unique_names(proposed, 'components')
+            meta_vars = [StringVariable(name=meta_name)]
             metas = numpy.array([['PC{}'.format(i + 1)
                                   for i in range(self.ncomponents)]],
                                 dtype=object).T
+            if self._variance_ratio is not None:
+                variance_name = get_unique_names(proposed, "variance")
+                meta_vars.append(ContinuousVariable(variance_name))
+                metas = numpy.hstack(
+                    (metas,
+                     self._variance_ratio[:self.ncomponents, None]))
+
+            dom = Domain(
+                [ContinuousVariable(name, compute_value=lambda _: None)
+                 for name in proposed],
+                metas=meta_vars)
             components = Table(dom, self._pca.components_[:self.ncomponents],
                                metas=metas)
             components.name = 'components'
 
-            pp = ApplyDomain(domain, "PCA")
+            data_dom = Domain(
+                self.data.domain.attributes,
+                self.data.domain.class_vars,
+                self.data.domain.metas + domain.attributes)
+            data = Table.from_numpy(
+                data_dom, self.data.X, self.data.Y,
+                numpy.hstack((self.data.metas, transformed.X)),
+                ids=self.data.ids)
 
         self._pca_projector.component = self.ncomponents
         self.Outputs.transformed_data.send(transformed)
         self.Outputs.components.send(components)
+        self.Outputs.data.send(data)
         self.Outputs.pca.send(self._pca_projector)
-        self.Outputs.preprocessor.send(pp)
 
     def send_report(self):
         if self.data is None:
             return
         self.report_items((
-            ("Decomposition", DECOMPOSITIONS[self.decomposition_idx].name),
             ("Normalize data", str(self.normalize)),
             ("Selected components", self.ncomponents),
             ("Explained variance", "{:.3f} %".format(self.variance_covered))
@@ -516,6 +367,14 @@ class OWPCA(widget.OWWidget):
                 settings["variance_covered"] = vc
         if settings.get("ncomponents", 0) > MAX_COMPONENTS:
             settings["ncomponents"] = MAX_COMPONENTS
+
+        # Remove old `decomposition_idx` when SVD was still included
+        settings.pop("decomposition_idx", None)
+
+        # Remove RemotePCA settings
+        settings.pop("batch_size", None)
+        settings.pop("address", None)
+        settings.pop("auto_update", None)
 
 
 if __name__ == "__main__":  # pragma: no cover

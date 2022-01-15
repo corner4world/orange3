@@ -2,10 +2,12 @@ from collections import OrderedDict
 
 from AnyQt.QtCore import Qt
 from AnyQt.QtWidgets import QLabel, QGridLayout
+import scipy.sparse as sp
 
 from Orange.data import Table
 from Orange.modelling import SVMLearner, NuSVMLearner
 from Orange.widgets import gui
+from Orange.widgets.widget import Msg
 from Orange.widgets.settings import Setting
 from Orange.widgets.utils.owlearnerwidget import OWBaseLearner
 from Orange.widgets.utils.signals import Output
@@ -27,17 +29,21 @@ class OWSVM(OWBaseLearner):
     LEARNER = SVMLearner
 
     class Outputs(OWBaseLearner.Outputs):
-        support_vectors = Output("Support vectors", Table, explicit=True)
+        support_vectors = Output("Support Vectors", Table, explicit=True,
+                                 replaces=["Support vectors"])
+
+    class Warning(OWBaseLearner.Warning):
+        sparse_data = Msg('Input data is sparse, default preprocessing is to scale it.')
 
     #: Different types of SVMs
     SVM, Nu_SVM = range(2)
     #: SVM type
     svm_type = Setting(SVM)
 
-    C = Setting(1.)
+    C = Setting(1.)  # pylint: disable=invalid-name
     epsilon = Setting(.1)
     nu_C = Setting(1.)
-    nu = Setting(.5)
+    nu = Setting(.5)  # pylint: disable=invalid-name
 
     #: Kernel types
     Linear, Poly, RBF, Sigmoid = range(4)
@@ -48,7 +54,7 @@ class OWSVM(OWBaseLearner):
     #: gamma
     gamma = Setting(0.0)
     #: coef0 (adative constant)
-    coef0 = Setting(0.0)
+    coef0 = Setting(1.0)
 
     #: numerical tolerance
     tol = Setting(0.001)
@@ -70,6 +76,7 @@ class OWSVM(OWBaseLearner):
         self._show_right_kernel()
 
     def _add_type_box(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
         form = QGridLayout()
         self.type_box = box = gui.radioButtonsInBox(
             self.controlArea, self, "svm_type", [], box="SVM Type",
@@ -77,7 +84,7 @@ class OWSVM(OWBaseLearner):
 
         self.epsilon_radio = gui.appendRadioButton(
             box, "SVM", addToLayout=False)
-        self.C_spin = gui.doubleSpin(
+        self.c_spin = gui.doubleSpin(
             box, self, "C", 0.1, 512.0, 0.1, decimals=2,
             alignment=Qt.AlignRight, addToLayout=False,
             callback=self.settings_changed)
@@ -87,7 +94,7 @@ class OWSVM(OWBaseLearner):
             callback=self.settings_changed)
         form.addWidget(self.epsilon_radio, 0, 0, Qt.AlignLeft)
         form.addWidget(QLabel("Cost (C):"), 0, 1, Qt.AlignRight)
-        form.addWidget(self.C_spin, 0, 2)
+        form.addWidget(self.c_spin, 0, 2)
         form.addWidget(QLabel(
             "Regression loss epsilon (ε):"), 1, 1, Qt.AlignRight)
         form.addWidget(self.epsilon_spin, 1, 2)
@@ -113,18 +120,19 @@ class OWSVM(OWBaseLearner):
     def _update_type(self):
         # Enable/disable SVM type parameters depending on selected SVM type
         if self.svm_type == self.SVM:
-            self.C_spin.setEnabled(True)
+            self.c_spin.setEnabled(True)
             self.epsilon_spin.setEnabled(True)
             self.nu_C_spin.setEnabled(False)
             self.nu_spin.setEnabled(False)
         else:
-            self.C_spin.setEnabled(False)
+            self.c_spin.setEnabled(False)
             self.epsilon_spin.setEnabled(False)
             self.nu_C_spin.setEnabled(True)
             self.nu_spin.setEnabled(True)
         self.settings_changed()
 
     def _add_kernel_box(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
         # Initialize with the widest label to measure max width
         self.kernel_eq = self.kernels[-1][1]
 
@@ -132,7 +140,7 @@ class OWSVM(OWBaseLearner):
 
         self.kernel_box = buttonbox = gui.radioButtonsInBox(
             box, self, "kernel_type", btnLabels=[k[0] for k in self.kernels],
-            callback=self._on_kernel_changed, addSpace=20)
+            callback=self._on_kernel_changed)
         buttonbox.layout().setSpacing(10)
         gui.rubber(buttonbox)
 
@@ -160,6 +168,7 @@ class OWSVM(OWBaseLearner):
         box.setMinimumWidth(box.sizeHint().width())
 
     def _add_optimization_box(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
         self.optimization_box = gui.vBox(
             self.controlArea, "Optimization Parameters")
         self.tol_spin = gui.doubleSpin(
@@ -168,7 +177,7 @@ class OWSVM(OWBaseLearner):
             alignment=Qt.AlignRight, controlWidth=100,
             callback=self.settings_changed)
         self.max_iter_spin = gui.spin(
-            self.optimization_box, self, "max_iter", 5, 1e6, 50,
+            self.optimization_box, self, "max_iter", 5, 1000000, 50,
             label="Iteration limit: ", checked="limit_iter",
             alignment=Qt.AlignRight, controlWidth=100,
             callback=self.settings_changed,
@@ -180,6 +189,7 @@ class OWSVM(OWBaseLearner):
                    [True, False, False],  # rbf
                    [True, True, False]]  # sigmoid
 
+        # set in _add_kernel_box, pylint: disable=attribute-defined-outside-init
         self.kernel_eq = self.kernels[self.kernel_type][1]
         mask = enabled[self.kernel_type]
         for spin, enabled in zip(self._kernel_params, mask):
@@ -195,6 +205,12 @@ class OWSVM(OWBaseLearner):
     def _on_kernel_changed(self):
         self._show_right_kernel()
         self.settings_changed()
+
+    def set_data(self, data):
+        self.Warning.sparse_data.clear()
+        super().set_data(data)
+        if self.data and sp.issparse(self.data.X):
+            self.Warning.sparse_data()
 
     def create_learner(self):
         kernel = ["linear", "poly", "rbf", "sigmoid"][self.kernel_type]

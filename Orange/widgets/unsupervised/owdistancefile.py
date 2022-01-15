@@ -3,10 +3,12 @@ import os
 from AnyQt.QtWidgets import QSizePolicy, QStyle, QMessageBox, QFileDialog
 from AnyQt.QtCore import QTimer
 
+from orangewidget.workflow.drophandler import SingleFileDropHandler
+
 from Orange.misc import DistMatrix
 from Orange.widgets import widget, gui
 from Orange.data import get_sample_datasets_dir
-from Orange.widgets.utils.filedialogs import RecentPathsWComboMixin
+from Orange.widgets.utils.filedialogs import RecentPathsWComboMixin, RecentPath
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 from Orange.widgets.widget import Output
 
@@ -17,7 +19,6 @@ class OWDistanceFile(widget.OWWidget, RecentPathsWComboMixin):
     description = "Read distances from a file."
     icon = "icons/DistanceFile.svg"
     priority = 10
-    category = "Data"
     keywords = ["load", "read", "open"]
 
     class Outputs:
@@ -31,7 +32,7 @@ class OWDistanceFile(widget.OWWidget, RecentPathsWComboMixin):
         RecentPathsWComboMixin.__init__(self)
         self.loaded_file = ""
 
-        vbox = gui.vBox(self.controlArea, "Distance File", addSpace=True)
+        vbox = gui.vBox(self.controlArea, "Distance File")
         box = gui.hBox(vbox)
         self.file_combo.setMinimumWidth(300)
         box.layout().addWidget(self.file_combo)
@@ -47,7 +48,7 @@ class OWDistanceFile(widget.OWWidget, RecentPathsWComboMixin):
         button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
         button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        box = gui.vBox(self.controlArea, "Info", addSpace=True)
+        box = gui.vBox(self.controlArea, "Info")
         self.infoa = gui.widgetLabel(box, 'No data loaded.')
         self.warnings = gui.widgetLabel(box, ' ')
         #Set word wrap, so long warnings won't expand the widget
@@ -55,11 +56,11 @@ class OWDistanceFile(widget.OWWidget, RecentPathsWComboMixin):
         self.warnings.setSizePolicy(
             QSizePolicy.Ignored, QSizePolicy.MinimumExpanding)
 
-        box = gui.hBox(self.controlArea)
+        gui.rubber(self.buttonsArea)
         gui.button(
-            box, self, "Browse documentation datasets",
+            self.buttonsArea, self, "Browse documentation datasets",
             callback=lambda: self.browse_file(True), autoDefault=False)
-        box.layout().addSpacing(200)
+        gui.rubber(self.buttonsArea)
 
         self.set_file_list()
         QTimer.singleShot(0, self.open_file)
@@ -142,6 +143,18 @@ class OWDistanceFile(widget.OWWidget, RecentPathsWComboMixin):
             self.report_paragraph("No data was loaded.")
         else:
             self.report_items([("File name", self.loaded_file)])
+
+
+class OWDistanceFileDropHandler(SingleFileDropHandler):
+    WIDGET = OWDistanceFile
+
+    def parametersFromFile(self, path):
+        r = RecentPath(os.path.abspath(path), None, None,
+                       os.path.basename(path))
+        return {"recent_paths": [r]}
+
+    def canDropFile(self, path: str) -> bool:
+        return os.path.splitext(path)[1].lower() == ".dst"
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -9,12 +9,14 @@ from typing import List, Any, Dict, Tuple, Type, Optional
 import numpy as np
 
 from AnyQt.QtWidgets import (
-    QGroupBox, QRadioButton, QPushButton, QHBoxLayout,
-    QVBoxLayout, QStackedWidget, QComboBox,
-    QButtonGroup, QStyledItemDelegate, QListView, QDoubleSpinBox
+    QGroupBox, QRadioButton, QPushButton, QHBoxLayout, QGridLayout,
+    QVBoxLayout, QStackedWidget, QComboBox, QWidget,
+    QButtonGroup, QStyledItemDelegate, QListView, QLabel
 )
-from AnyQt.QtCore import Qt, QThread, QModelIndex
+from AnyQt.QtCore import Qt, QThread, QModelIndex, QDateTime
 from AnyQt.QtCore import pyqtSlot as Slot
+
+from orangewidget.utils.listview import ListViewSearch
 
 import Orange.data
 from Orange.preprocess import impute
@@ -24,9 +26,9 @@ from Orange.widgets.utils import itemmodels
 from Orange.widgets.utils import concurrent as qconcurrent
 from Orange.widgets.utils.sql import check_sql_input
 from Orange.widgets.utils.widgetpreview import WidgetPreview
+from Orange.widgets.utils.spinbox import DoubleSpinBox
 from Orange.widgets.widget import OWWidget, Msg, Input, Output
 from Orange.classification import SimpleTreeLearner
-
 
 DisplayMethodRole = Qt.UserRole
 StateRole = DisplayMethodRole + 0xf4
@@ -124,12 +126,17 @@ def var_key(var):
     return qname, var.name
 
 
+DBL_MIN = np.finfo(float).min
+DBL_MAX = np.finfo(float).max
+
+
 class OWImpute(OWWidget):
     name = "Impute"
     description = "Impute missing values in the data table."
     icon = "icons/Impute.svg"
     priority = 2130
     keywords = ["substitute", "missing"]
+    category = "Transform"
 
     class Inputs:
         data = Input("Data", Orange.data.Table)
@@ -140,7 +147,11 @@ class OWImpute(OWWidget):
 
     class Error(OWWidget.Error):
         imputation_failed = Msg("Imputation failed for '{}'")
-        model_based_imputer_sparse = Msg("Model based imputer does not work for sparse data")
+        model_based_imputer_sparse = \
+            Msg("Model based imputer does not work for sparse data")
+
+    class Warning(OWWidget.Warning):
+        cant_handle_var = Msg("Default method can not handle '{}'")
 
     settingsHandler = settings.DomainContextHandler()
 
@@ -149,6 +160,8 @@ class OWImpute(OWWidget):
     _variable_imputation_state = settings.ContextSetting({})  # type: VariableState
 
     autocommit = settings.Setting(True)
+    default_numeric_value = settings.Setting(0.0)
+    default_time = settings.Setting(0)
 
     want_main_area = False
     resizing_enabled = False
@@ -157,39 +170,81 @@ class OWImpute(OWWidget):
         super().__init__()
         self.data = None  # type: Optional[Orange.data.Table]
         self.learner = None  # type: Optional[Learner]
-        self.default_learner = SimpleTreeLearner()
+        self.default_learner = SimpleTreeLearner(min_instances=10, max_depth=10)
         self.modified = False
         self.executor = qconcurrent.ThreadExecutor(self)
         self.__task = None
 
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        self.controlArea.layout().addLayout(main_layout)
+        main_layout = self.controlArea.layout()
 
-        box = QGroupBox(title=self.tr("Default Method"), flat=False)
-        box_layout = QVBoxLayout(box)
-        main_layout.addWidget(box)
+        box = gui.vBox(self.controlArea, "Default Method")
+
+        box_layout = QGridLayout()
+        box_layout.setSpacing(8)
+        box.layout().addLayout(box_layout)
 
         button_group = QButtonGroup()
         button_group.buttonClicked[int].connect(self.set_default_method)
 
-        for method, _ in list(METHODS.items())[1:-1]:
+        for i, (method, _) in enumerate(list(METHODS.items())[1:-1]):
             imputer = self.create_imputer(method)
             button = QRadioButton(imputer.name)
             button.setChecked(method == self.default_method_index)
             button_group.addButton(button, method)
-            box_layout.addWidget(button)
+            box_layout.addWidget(button, i % 3, i // 3)
+
+        def set_default_time(datetime):
+            datetime = datetime.toSecsSinceEpoch()
+            if datetime != self.default_time:
+                self.default_time = datetime
+                if self.default_method_index == Method.Default:
+                    self._invalidate()
+
+        hlayout = QHBoxLayout()
+        box.layout().addLayout(hlayout)
+        button = QRadioButton("Fixed values; numeric variables:")
+        button_group.addButton(button, Method.Default)
+        button.setChecked(Method.Default == self.default_method_index)
+        hlayout.addWidget(button)
+
+        self.numeric_value_widget = DoubleSpinBox(
+            minimum=DBL_MIN, maximum=DBL_MAX, singleStep=.1,
+            value=self.default_numeric_value,
+            alignment=Qt.AlignRight,
+            enabled=self.default_method_index == Method.Default,
+        )
+        self.numeric_value_widget.editingFinished.connect(
+            self.__on_default_numeric_value_edited
+        )
+        self.connect_control(
+            "default_numeric_value", self.numeric_value_widget.setValue
+        )
+        hlayout.addWidget(self.numeric_value_widget)
+
+        hlayout.addWidget(QLabel(", time:"))
+
+        self.time_widget = gui.DateTimeEditWCalendarTime(self)
+        self.time_widget.setEnabled(self.default_method_index == Method.Default)
+        self.time_widget.setKeyboardTracking(False)
+        self.time_widget.setContentsMargins(0, 0, 0, 0)
+        self.time_widget.set_datetime(
+            QDateTime.fromSecsSinceEpoch(self.default_time)
+        )
+        self.connect_control(
+            "default_time",
+            lambda value: self.time_widget.set_datetime(
+                QDateTime.fromSecsSinceEpoch(value)
+            )
+        )
+        self.time_widget.dateTimeChanged.connect(set_default_time)
+        hlayout.addWidget(self.time_widget)
 
         self.default_button_group = button_group
 
-        box = QGroupBox(title=self.tr("Individual Attribute Settings"),
-                        flat=False)
-        main_layout.addWidget(box)
+        box = gui.hBox(self.controlArea, self.tr("Individual Attribute Settings"),
+                       flat=False)
 
-        horizontal_layout = QHBoxLayout(box)
-        main_layout.addWidget(box)
-
-        self.varview = QListView(
+        self.varview = ListViewSearch(
             selectionMode=QListView.ExtendedSelection,
             uniformItemSizes=True
         )
@@ -201,10 +256,12 @@ class OWImpute(OWWidget):
         )
         self.selection = self.varview.selectionModel()
 
-        horizontal_layout.addWidget(self.varview)
+        box.layout().addWidget(self.varview)
+        vertical_layout = QVBoxLayout(margin=0)
 
-        method_layout = QVBoxLayout()
-        horizontal_layout.addLayout(method_layout)
+        self.methods_container = QWidget(enabled=False)
+        method_layout = QVBoxLayout(margin=0)
+        self.methods_container.setLayout(method_layout)
 
         button_group = QButtonGroup()
         for method in Method:
@@ -215,12 +272,12 @@ class OWImpute(OWWidget):
 
         self.value_combo = QComboBox(
             minimumContentsLength=8,
-            sizeAdjustPolicy=QComboBox.AdjustToMinimumContentsLength,
+            sizeAdjustPolicy=QComboBox.AdjustToMinimumContentsLengthWithIcon,
             activated=self._on_value_selected
             )
-        self.value_double = QDoubleSpinBox(
+        self.value_double = DoubleSpinBox(
             editingFinished=self._on_value_selected,
-            minimum=-1000., maximum=1000., singleStep=.1, decimals=3,
+            minimum=DBL_MIN, maximum=DBL_MAX, singleStep=.1,
             )
         self.value_stack = value_stack = QStackedWidget()
         value_stack.addWidget(self.value_combo)
@@ -231,22 +288,20 @@ class OWImpute(OWWidget):
             self.set_method_for_current_selection
         )
 
-        method_layout.addStretch(2)
+        self.reset_button = QPushButton(
+            "Restore All to Default", enabled=False, default=False,
+            autoDefault=False, clicked=self.reset_variable_state,
+        )
 
-        reset_button = QPushButton(
-            "Restore All to Default", checked=False, checkable=False,
-            clicked=self.reset_variable_state, default=False,
-            autoDefault=False)
-        method_layout.addWidget(reset_button)
+        vertical_layout.addWidget(self.methods_container)
+        vertical_layout.addStretch(2)
+        vertical_layout.addWidget(self.reset_button)
+
+        box.layout().addLayout(vertical_layout)
 
         self.variable_button_group = button_group
 
-        box = gui.auto_commit(
-            self.controlArea, self, "autocommit", "Apply",
-            orientation=Qt.Horizontal,
-            checkbox_label="Apply automatically")
-        box.button.setFixedWidth(180)
-        box.layout().insertStretch(0)
+        gui.auto_apply(self.buttonsArea, self, "autocommit")
 
     def create_imputer(self, method, *args):
         # type: (Method, ...) -> impute.BaseImputeMethod
@@ -261,6 +316,11 @@ class OWImpute(OWWidget):
             m = AsDefault()
             m.method = default
             return m
+        elif method == Method.Default and not args:  # global default values
+            return impute.FixedValueByType(
+                default_continuous=self.default_numeric_value,
+                default_time=self.default_time
+            )
         else:
             return METHODS[method](*args)
 
@@ -274,6 +334,8 @@ class OWImpute(OWWidget):
             assert index != Method.AsAboveSoBelow
             self._default_method_index = index
             self.default_button_group.button(index).setChecked(True)
+            self.time_widget.setEnabled(index == Method.Default)
+            self.numeric_value_widget.setEnabled(index == Method.Default)
             # update variable view
             self.update_varview()
             self._invalidate()
@@ -283,9 +345,17 @@ class OWImpute(OWWidget):
         """
         self.default_method_index = index
 
+    def __on_default_numeric_value_edited(self):
+        val = self.numeric_value_widget.value()
+        if val != self.default_numeric_value:
+            self.default_numeric_value = val
+            if self.default_method_index == Method.Default:
+                self._invalidate()
+
     @Inputs.data
     @check_sql_input
     def set_data(self, data):
+        self.cancel()
         self.closeContext()
         self.varmodel[:] = []
         self._variable_imputation_state = {}  # type: VariableState
@@ -297,12 +367,14 @@ class OWImpute(OWWidget):
             self.openContext(data.domain)
             # restore per variable imputation state
             self._restore_state(self._variable_imputation_state)
+        self.reset_button.setEnabled(len(self.varmodel) > 0)
 
         self.update_varview()
-        self.unconditional_commit()
+        self.commit.now()
 
     @Inputs.learner
     def set_learner(self, learner):
+        self.cancel()
         self.learner = learner or self.default_learner
         imputer = self.create_imputer(Method.Model)
         button = self.default_button_group.button(Method.Model)
@@ -315,7 +387,7 @@ class OWImpute(OWWidget):
             self.default_method_index = Method.Model
 
         self.update_varview()
-        self.commit()
+        self.commit.deferred()
 
     def get_method_for_column(self, column_index):
         # type: (int) -> impute.BaseImputeMethod
@@ -333,15 +405,16 @@ class OWImpute(OWWidget):
         self.modified = True
         if self.__task is not None:
             self.cancel()
-        self.commit()
+        self.commit.deferred()
 
+    @gui.deferred
     def commit(self):
         self.cancel()
         self.warning()
         self.Error.imputation_failed.clear()
         self.Error.model_based_imputer_sparse.clear()
 
-        if self.data is None or len(self.data) == 0 or len(self.varmodel) == 0:
+        if not self.data or not self.varmodel.rowCount():
             self.Outputs.data.send(self.data)
             self.modified = False
             return
@@ -359,6 +432,7 @@ class OWImpute(OWWidget):
 
         def impute_one(method, var, data):
             # type: (impute.BaseImputeMethod, Variable, Table) -> Any
+            # Readability counts, pylint: disable=no-else-raise
             if isinstance(method, impute.Model) and data.is_sparse():
                 raise SparseNotSupported()
             elif isinstance(method, impute.DropInstances):
@@ -378,8 +452,8 @@ class OWImpute(OWWidget):
         w.doneAll.connect(self.__commit_finish)
         w.progressChanged.connect(self.__progress_changed)
         self.__task = Task(futures, w)
-        self.progressBarInit(processEvents=False)
-        self.setBlocking(True)
+        self.progressBarInit()
+        self.setInvalidated(True)
 
     @Slot()
     def __commit_finish(self):
@@ -389,59 +463,62 @@ class OWImpute(OWWidget):
         assert len(futures) == len(self.varmodel)
         assert self.data is not None
 
-        self.__task = None
-        self.setBlocking(False)
-        self.progressBarFinished()
-
-        data = self.data
-        attributes = []
-        class_vars = []
-        drop_mask = np.zeros(len(self.data), bool)
-
-        for i, (var, fut) in enumerate(zip(self.varmodel, futures)):
-            assert fut.done()
-            newvar = []
+        def get_variable(variable, future, drop_mask) \
+                -> Optional[List[Orange.data.Variable]]:
+            # Returns a (potentially empty) list of variables,
+            # or None on failure that should interrupt the imputation
+            assert future.done()
             try:
-                res = fut.result()
+                res = future.result()
             except SparseNotSupported:
                 self.Error.model_based_imputer_sparse()
-                # ?? break
+                return []  # None?
             except VariableNotSupported:
-                self.warning("Default method can not handle '{}'".
-                             format(var.name))
+                self.Warning.cant_handle_var(variable.name)
+                return []
             except Exception:  # pylint: disable=broad-except
                 log = logging.getLogger(__name__)
-                log.info("Error for %s", var, exc_info=True)
-                self.Error.imputation_failed(var.name)
-                attributes = class_vars = None
-                break
+                log.info("Error for %s", variable.name, exc_info=True)
+                self.Error.imputation_failed(variable.name)
+                return None
+            if isinstance(res, RowMask):
+                drop_mask |= res.mask
+                newvar = variable
             else:
-                if isinstance(res, RowMask):
-                    drop_mask |= res.mask
-                    newvar = var
-                else:
-                    newvar = res
-
+                newvar = res
             if isinstance(newvar, Orange.data.Variable):
                 newvar = [newvar]
+            return newvar
 
-            if i < len(data.domain.attributes):
-                attributes.extend(newvar)
-            else:
-                class_vars.extend(newvar)
-
-        if attributes is None:
-            data = None
-        else:
-            domain = Orange.data.Domain(attributes, class_vars,
-                                        data.domain.metas)
+        def create_data(attributes, class_vars):
+            domain = Orange.data.Domain(
+                attributes, class_vars, self.data.domain.metas)
             try:
-                data = self.data.from_table(domain, data[~drop_mask])
+                return self.data.from_table(domain, self.data[~drop_mask])
             except Exception:  # pylint: disable=broad-except
                 log = logging.getLogger(__name__)
                 log.info("Error", exc_info=True)
                 self.Error.imputation_failed("Unknown")
+                return None
+
+        self.__task = None
+        self.setInvalidated(False)
+        self.progressBarFinished()
+
+        attributes = []
+        class_vars = []
+        drop_mask = np.zeros(len(self.data), bool)
+        for i, (var, fut) in enumerate(zip(self.varmodel, futures)):
+            newvar = get_variable(var, fut, drop_mask)
+            if newvar is None:
                 data = None
+                break
+            if i < len(self.data.domain.attributes):
+                attributes.extend(newvar)
+            else:
+                class_vars.extend(newvar)
+        else:
+            data = create_data(attributes, class_vars)
 
         self.Outputs.data.send(data)
         self.modified = False
@@ -453,18 +530,22 @@ class OWImpute(OWWidget):
         self.progressBarSet(100. * n / d)
 
     def cancel(self):
+        self.__cancel(wait=False)
+
+    def __cancel(self, wait=False):
         if self.__task is not None:
             task, self.__task = self.__task, None
             task.cancel()
             task.watcher.doneAll.disconnect(self.__commit_finish)
             task.watcher.progressChanged.disconnect(self.__progress_changed)
-            concurrent.futures.wait(task.futures)
-            task.watcher.flush()
+            if wait:
+                concurrent.futures.wait(task.futures)
+                task.watcher.flush()
             self.progressBarFinished()
-            self.setBlocking(False)
+            self.setInvalidated(False)
 
     def onDeleteWidget(self):
-        self.cancel()
+        self.__cancel(wait=True)
         super().onDeleteWidget()
 
     def send_report(self):
@@ -484,7 +565,10 @@ class OWImpute(OWWidget):
             self.report_items((("Method", default.name),))
 
     def _on_var_selection_changed(self):
+        # Method is well documented, splitting it is not needed for readability,
+        # thus pylint: disable=too-many-branches
         indexes = self.selection.selectedIndexes()
+        self.methods_container.setEnabled(len(indexes) > 0)
         defmethod = (Method.AsAboveSoBelow, ())
         methods = [index.data(StateRole) for index in indexes]
         methods = [m if m is not None else defmethod for m in methods]
@@ -632,5 +716,19 @@ class OWImpute(OWWidget):
         super().storeSpecificSettings()
 
 
+def __sample_data():  # pragma: no cover
+    domain = Orange.data.Domain(
+        [Orange.data.ContinuousVariable(f"c{i}") for i in range(3)]
+        + [Orange.data.TimeVariable(f"t{i}") for i in range(3)],
+        [])
+    n = np.nan
+    x = np.array([
+        [1, 2, n, 1000, n, n],
+        [2, n, 1, n, 2000, 2000]
+    ])
+    return Orange.data.Table(domain, x, np.empty((2, 0)))
+
+
 if __name__ == "__main__":  # pragma: no cover
+    # WidgetPreview(OWImpute).run(__sample_data())
     WidgetPreview(OWImpute).run(Orange.data.Table("brown-selected"))

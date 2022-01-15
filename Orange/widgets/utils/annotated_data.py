@@ -35,11 +35,14 @@ def _table_with_annotation_column(data, values, column_data, var_name):
     class_vars, metas = data.domain.class_vars, data.domain.metas
     if not data.domain.class_vars:
         class_vars += (var, )
+        column_data = column_data.reshape((len(data), ))
     else:
         metas += (var, )
+        column_data = column_data.reshape((len(data), 1))
     domain = Domain(data.domain.attributes, class_vars, metas)
     table = data.transform(domain)
-    table[:, var] = column_data.reshape((len(data), 1))
+    with table.unlocked(table.Y if not data.domain.class_vars else table.metas):
+        table[:, var] = column_data
     return table
 
 
@@ -64,15 +67,18 @@ def create_annotated_table(data, selected_indices):
 
 def create_groups_table(data, selection,
                         include_unselected=True,
-                        var_name=ANNOTATED_DATA_FEATURE_NAME):
+                        var_name=ANNOTATED_DATA_FEATURE_NAME,
+                        values=None):
     if data is None:
         return None
     max_sel = np.max(selection)
-    values = ["G{}".format(i + 1) for i in range(max_sel)]
+    if values is None:
+        values = ["G{}".format(i + 1) for i in range(max_sel)]
+        if include_unselected:
+            values.append("Unselected")
     if include_unselected:
         # Place Unselected instances in the "last group", so that the group
         # colors and scatter diagram marker colors will match
-        values.append("Unselected")
         mask = (selection != 0)
         selection = selection.copy()
         selection[mask] = selection[mask] - 1

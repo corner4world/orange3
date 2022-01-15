@@ -14,6 +14,7 @@ from Orange.regression import (LinearRegressionLearner,
                                ElasticNetCVLearner,
                                MeanLearner)
 from Orange.evaluation import CrossValidation, RMSE
+from Orange.util import OrangeDeprecationWarning
 
 
 class TestLinearRegressionLearner(unittest.TestCase):
@@ -31,7 +32,7 @@ class TestLinearRegressionLearner(unittest.TestCase):
 
         x1, x2 = np.split(x, 2)
         y1, y2 = np.split(y, 2)
-        t = Table(x1, y1)
+        t = Table.from_numpy(None, x1, y1)
         learn = LinearRegressionLearner()
         clf = learn(t)
         z = clf(x2)
@@ -44,7 +45,8 @@ class TestLinearRegressionLearner(unittest.TestCase):
         elasticCV = ElasticNetCVLearner()
         mean = MeanLearner()
         learners = [ridge, lasso, elastic, elasticCV, mean]
-        res = CrossValidation(self.housing, learners, k=2)
+        cv = CrossValidation(k=2)
+        res = cv(self.housing, learners)
         rmse = RMSE(res)
         for i in range(len(learners) - 1):
             self.assertLess(rmse[i], rmse[-1])
@@ -81,7 +83,7 @@ class TestLinearRegressionLearner(unittest.TestCase):
                 np.testing.assert_array_almost_equal(score, scores[:, i])
 
     def test_coefficients(self):
-        data = Table([[11], [12], [13]], [0, 1, 2])
+        data = Table.from_numpy(None, [[11], [12], [13]], [0, 1, 2])
         model = LinearRegressionLearner()(data)
         self.assertAlmostEqual(float(model.intercept), -11)
         self.assertEqual(len(model.coefficients), 1)
@@ -117,3 +119,14 @@ class TestLinearRegressionLearner(unittest.TestCase):
         learner2 = eval(repr_text)
 
         self.assertIsInstance(learner2, LinearRegressionLearner)
+
+    def test_deprecated_normalize(self):
+        """ When this test starts to fail:
+        - remove normalize=False kwargs from Orange.regression.
+        - remove _remove_deprecated_normalize and its calls
+        - remove this test
+        """
+        import Orange  # pylint: disable=import-outside-toplevel
+        self.assertLess(Orange.__version__, "3.33")
+        with self.assertWarns(OrangeDeprecationWarning):
+            RidgeRegressionLearner(normalize=True)

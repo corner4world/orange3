@@ -3,13 +3,7 @@ from Orange.data import Table
 
 
 class EvaluateTest:
-
     def test_many_evaluation_results(self):
-        """
-        Now works with more than 9 evaluation results.
-        GH-2394 (ROC Analysis)
-        GH-2522 (Lift Curve, Calibration Plot)
-        """
         data = Table("iris")
         learners = [
             classification.MajorityLearner(),
@@ -23,5 +17,6 @@ class EvaluateTest:
             classification.NaiveBayesLearner(),
             classification.SGDClassificationLearner()
         ]
-        res = evaluation.CrossValidation(data, learners, k=2, store_data=True)
+        res = evaluation.CrossValidation(k=2, store_data=True)(data, learners)
+        # this is a mixin; pylint: disable=no-member
         self.send_signal("Evaluation Results", res)

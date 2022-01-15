@@ -1,3 +1,5 @@
+# pylint: disable=protected-access
+
 from Orange.data import Table, Domain
 from Orange.widgets.data.owselectbydataindex import OWSelectByDataIndex
 from Orange.widgets.tests.base import WidgetTest

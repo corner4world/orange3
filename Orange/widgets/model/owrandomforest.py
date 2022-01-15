@@ -24,18 +24,22 @@ class OWRandomForest(OWBaseLearner):
     n_estimators = settings.Setting(10)
     max_features = settings.Setting(5)
     use_max_features = settings.Setting(False)
-    random_state = settings.Setting(0)
     use_random_state = settings.Setting(False)
     max_depth = settings.Setting(3)
     use_max_depth = settings.Setting(False)
     min_samples_split = settings.Setting(5)
     use_min_samples_split = settings.Setting(True)
     index_output = settings.Setting(0)
+    class_weight = settings.Setting(False)
 
     class Error(OWBaseLearner.Error):
         not_enough_features = Msg("Insufficient number of attributes ({})")
 
+    class Warning(OWBaseLearner.Warning):
+        class_weights_used = Msg("Weighting by class may decrease performance.")
+
     def add_main_layout(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
         box = gui.vBox(self.controlArea, 'Basic Properties')
         self.n_estimators_spin = gui.spin(
             box, self, "n_estimators", minv=1, maxv=10000, controlWidth=80,
@@ -46,11 +50,17 @@ class OWRandomForest(OWBaseLearner):
             label="Number of attributes considered at each split: ",
             callback=self.settings_changed, checked="use_max_features",
             checkCallback=self.settings_changed, alignment=Qt.AlignRight,)
-        self.random_state_spin = gui.spin(
-            box, self, "random_state", 0, 2 ** 31 - 1, controlWidth=80,
-            label="Fixed seed for random generator: ", alignment=Qt.AlignRight,
-            callback=self.settings_changed, checked="use_random_state",
-            checkCallback=self.settings_changed)
+        self.random_state = gui.checkBox(
+            box, self, "use_random_state", label="Replicable training",
+            callback=self.settings_changed,
+            attribute=Qt.WA_LayoutUsesWidgetRect)
+        self.weights = gui.checkBox(
+            box, self,
+            "class_weight", label="Balance class distribution",
+            callback=self.settings_changed,
+            tooltip="Weigh classes inversely proportional to their frequencies.",
+            attribute=Qt.WA_LayoutUsesWidgetRect
+        )
 
         box = gui.vBox(self.controlArea, "Growth Control")
         self.max_depth_spin = gui.spin(
@@ -65,15 +75,19 @@ class OWRandomForest(OWBaseLearner):
             checkCallback=self.settings_changed, alignment=Qt.AlignRight)
 
     def create_learner(self):
+        self.Warning.class_weights_used.clear()
         common_args = {"n_estimators": self.n_estimators}
         if self.use_max_features:
             common_args["max_features"] = self.max_features
         if self.use_random_state:
-            common_args["random_state"] = self.random_state
+            common_args["random_state"] = 0
         if self.use_max_depth:
             common_args["max_depth"] = self.max_depth
         if self.use_min_samples_split:
             common_args["min_samples_split"] = self.min_samples_split
+        if self.class_weight:
+            common_args["class_weight"] = "balanced"
+            self.Warning.class_weights_used()
 
         return self.LEARNER(preprocessors=self.preprocessors, **common_args)
 
@@ -92,11 +106,13 @@ class OWRandomForest(OWBaseLearner):
             ("Number of trees", self.n_estimators),
             ("Maximal number of considered features",
              self.max_features if self.use_max_features else "unlimited"),
-            ("Fixed random seed", self.use_random_state and self.random_state),
+            ("Replicable training", ["No", "Yes"][self.use_random_state]),
             ("Maximal tree depth",
              self.max_depth if self.use_max_depth else "unlimited"),
             ("Stop splitting nodes with maximum instances",
-             self.min_samples_split if self.use_min_samples_split else "unlimited")
+             self.min_samples_split if self.use_min_samples_split else
+             "unlimited"),
+            ("Class weights", self.class_weight)
         )
 
 

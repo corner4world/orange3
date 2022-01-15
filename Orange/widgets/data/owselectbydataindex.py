@@ -12,6 +12,7 @@ from Orange.widgets.utils.annotated_data import (create_annotated_table)
 class OWSelectByDataIndex(widget.OWWidget):
     name = "Select by Data Index"
     description = "Match instances by index from data subset."
+    category = "Transform"
     icon = "icons/SelectByDataIndex.svg"
     priority = 1112
 
@@ -27,6 +28,7 @@ class OWSelectByDataIndex(widget.OWWidget):
         annotated_data = Output("Annotated Data", Table)
 
     want_main_area = False
+    buttons_area_orientation = None
     resizing_enabled = False
 
     class Warning(widget.OWWidget.Warning):
@@ -64,12 +66,13 @@ class OWSelectByDataIndex(widget.OWWidget):
     def handleNewSignals(self):
         self._invalidate()
 
-    def data_info_text(self, data):
+    @staticmethod
+    def data_info_text(data):
         if data is None:
             return "No data."
         else:
             return "{}\n{} instances\n{} variables".format(
-                data.name, len(data), len(data.domain) + len(data.domain.metas))
+                data.name, len(data), len(data.domain.variables) + len(data.domain.metas))
 
     def commit(self):
         self.Warning.instances_not_matching.clear()
@@ -81,12 +84,14 @@ class OWSelectByDataIndex(widget.OWWidget):
             non_matching_output = None
             annotated_output = None
         else:
-            if self.data_subset and len(np.intersect1d(subset_ids, self.data.ids)) == 0:
+            if self.data_subset and \
+                    not np.intersect1d(subset_ids, self.data.ids).size:
                 self.Warning.instances_not_matching()
             row_sel = np.in1d(self.data.ids, subset_ids)
             matching_output = self.data[row_sel]
             non_matching_output = self.data[~row_sel]
             annotated_output = create_annotated_table(self.data, row_sel)
+
         self.Outputs.matching_data.send(matching_output)
         self.Outputs.non_matching_data.send(non_matching_output)
         self.Outputs.annotated_data.send(annotated_output)
@@ -101,7 +106,7 @@ class OWSelectByDataIndex(widget.OWWidget):
 
 
 if __name__ == "__main__":  # pragma: no cover
-    data = Table("iris.tab")
+    iris = Table("iris.tab")
     WidgetPreview(OWSelectByDataIndex).run(
-        set_data=data,
-        set_data_subset=data[:20])
+        set_data=iris,
+        set_data_subset=iris[:20])

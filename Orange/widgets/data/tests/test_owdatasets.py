@@ -1,3 +1,4 @@
+import unittest
 from unittest.mock import patch, Mock
 
 import requests
@@ -9,9 +10,9 @@ from Orange.widgets.tests.base import WidgetTest
 
 
 class TestOWDataSets(WidgetTest):
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_remote",
+    @patch("Orange.widgets.data.owdatasets.list_remote",
            Mock(side_effect=requests.exceptions.ConnectionError))
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_local",
+    @patch("Orange.widgets.data.owdatasets.list_local",
            Mock(return_value={}))
     @patch("Orange.widgets.data.owdatasets.log", Mock())
     def test_no_internet_connection(self):
@@ -19,9 +20,9 @@ class TestOWDataSets(WidgetTest):
         self.wait_until_stop_blocking(w)
         self.assertTrue(w.Error.no_remote_datasets.is_shown())
 
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_remote",
+    @patch("Orange.widgets.data.owdatasets.list_remote",
            Mock(side_effect=requests.exceptions.ConnectionError))
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_local",
+    @patch("Orange.widgets.data.owdatasets.list_local",
            Mock(return_value={('core', 'foo.tab'): {}}))
     @patch("Orange.widgets.data.owdatasets.log", Mock())
     def test_only_local(self):
@@ -30,9 +31,9 @@ class TestOWDataSets(WidgetTest):
         self.assertTrue(w.Warning.only_local_datasets.is_shown())
         self.assertEqual(w.view.model().rowCount(), 1)
 
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_remote",
+    @patch("Orange.widgets.data.owdatasets.list_remote",
            Mock(side_effect=requests.exceptions.ConnectionError))
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_local",
+    @patch("Orange.widgets.data.owdatasets.list_local",
            Mock(return_value={('core', 'foo.tab'): {},
                               ('core', 'bar.tab'): {}}))
     @patch("Orange.widgets.data.owdatasets.log", Mock())
@@ -47,9 +48,9 @@ class TestOWDataSets(WidgetTest):
         w.filterLineEdit.setText("")
         self.assertEqual(w.view.model().rowCount(), 2)
 
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_remote",
+    @patch("Orange.widgets.data.owdatasets.list_remote",
            Mock(return_value={('core', 'iris.tab'): {}}))
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_local",
+    @patch("Orange.widgets.data.owdatasets.list_local",
            Mock(return_value={}))
     @patch("Orange.widgets.data.owdatasets.ensure_local",
            Mock(return_value="iris.tab"))
@@ -59,13 +60,13 @@ class TestOWDataSets(WidgetTest):
         # select the only dataset
         sel_type = QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows
         w.view.selectionModel().select(w.view.model().index(0, 0), sel_type)
-        w.unconditional_commit()
+        w.commit()
         iris = self.get_output(w.Outputs.data, w)
         self.assertEqual(len(iris), 150)
 
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_remote",
+    @patch("Orange.widgets.data.owdatasets.list_remote",
            Mock(side_effect=requests.exceptions.ConnectionError))
-    @patch("Orange.widgets.data.owdatasets.OWDataSets.list_local",
+    @patch("Orange.widgets.data.owdatasets.list_local",
            Mock(return_value={('dir1', 'dir2', 'foo.tab'): {},
                               ('bar.tab',): {}}))
     @patch("Orange.widgets.data.owdatasets.log", Mock())
@@ -73,3 +74,7 @@ class TestOWDataSets(WidgetTest):
         w = self.create_widget(OWDataSets)  # type: OWDataSets
         self.wait_until_stop_blocking(w)
         self.assertEqual(w.view.model().rowCount(), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

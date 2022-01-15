@@ -2,15 +2,20 @@ from concurrent.futures import Future
 from typing import Optional, List, Dict
 
 import numpy as np
+import scipy.sparse as sp
+
 from AnyQt.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QThread, \
     pyqtSlot as Slot
 from AnyQt.QtGui import QIntValidator
 from AnyQt.QtWidgets import QGridLayout, QTableView
+from sklearn.metrics import silhouette_samples, silhouette_score
 
 from Orange.clustering import KMeans
-from Orange.clustering.kmeans import KMeansModel, SILHOUETTE_MAX_SAMPLES
+from Orange.clustering.kmeans import KMeansModel
 from Orange.data import Table, Domain, DiscreteVariable, ContinuousVariable
-from Orange.data.util import get_unique_names
+from Orange.data.util import get_unique_names, array_equal
+from Orange.preprocess import Normalize
+from Orange.preprocess.impute import ReplaceUnknowns
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import Setting
 from Orange.widgets.utils.annotated_data import \
@@ -22,6 +27,7 @@ from Orange.widgets.widget import Input, Output
 
 
 RANDOM_STATE = 0
+SILHOUETTE_MAX_SAMPLES = 5000
 
 
 class ClusterTableModel(QAbstractTableModel):
@@ -33,7 +39,8 @@ class ClusterTableModel(QAbstractTableModel):
     def rowCount(self, index=QModelIndex()):
         return 0 if index.isValid() else len(self.scores)
 
-    def columnCount(self, index=QModelIndex()):
+    @staticmethod
+    def columnCount(_index=QModelIndex()):
         return 1
 
     def flags(self, index):
@@ -64,10 +71,12 @@ class ClusterTableModel(QAbstractTableModel):
             return score
         elif role == gui.BarRatioRole and valid:
             return score
+        return None
 
-    def headerData(self, row, orientation, role=Qt.DisplayRole):
+    def headerData(self, row, _orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole:
             return str(row + self.start_k)
+        return None
 
 
 class Task:
@@ -122,12 +131,12 @@ class OWKMeans(widget.OWWidget):
         not_enough_data = widget.Msg(
             "Too few ({}) unique data instances for {} clusters"
         )
+        no_sparse_normalization = widget.Msg("Sparse data cannot be normalized")
 
     INIT_METHODS = (("Initialize with KMeans++", "k-means++"),
                     ("Random initialization", "random"))
 
     resizing_enabled = False
-    buttons_area_orientation = Qt.Vertical
 
     k = Setting(3)
     k_from = Setting(2)
@@ -136,7 +145,9 @@ class OWKMeans(widget.OWWidget):
     max_iterations = Setting(300)
     n_init = Setting(10)
     smart_init = Setting(0)  # KMeans++
+    selection = Setting(None, schema_only=True)  # type: Optional[int]
     auto_commit = Setting(True)
+    normalize = Setting(True)
 
     settings_version = 2
 
@@ -152,6 +163,7 @@ class OWKMeans(widget.OWWidget):
         super().__init__()
 
         self.data = None  # type: Optional[Table]
+        self.__pending_selection = self.selection  # type: Optional[int]
         self.clusterings = {}
 
         self.__executor = ThreadExecutor(parent=self)
@@ -188,6 +200,10 @@ class OWKMeans(widget.OWWidget):
             callback=self.update_to)
         gui.rubber(ftobox)
 
+        box = gui.vBox(self.controlArea, "Preprocessing")
+        gui.checkBox(box, self, "normalize", "Normalize columns",
+                     callback=self.invalidate)
+
         box = gui.vBox(self.controlArea, "Initialization")
         gui.comboBox(
             box, self, "smart_init", items=[m[0] for m in self.INIT_METHODS],
@@ -209,13 +225,13 @@ class OWKMeans(widget.OWWidget):
             sb, self, "max_iterations", controlWidth=60, valueType=int,
             validator=QIntValidator(), callback=self.invalidate)
 
-        self.apply_button = gui.auto_commit(
-            self.buttonsArea, self, "auto_commit", "Apply", box=None,
-            commit=self.commit)
-        gui.rubber(self.controlArea)
-
         box = gui.vBox(self.mainArea, box="Silhouette Scores")
-        self.mainArea.setVisible(self.optimize_k)
+        if self.optimize_k:
+            self.mainArea.setVisible(True)
+            self.left_side.setContentsMargins(0, 0, 0, 0)
+        else:
+            self.mainArea.setVisible(False)
+            self.left_side.setContentsMargins(0, 0, 4, 0)
         self.table_model = ClusterTableModel(self)
         table = self.table_view = QTableView(self.mainArea)
         table.setModel(self.table_model)
@@ -229,6 +245,9 @@ class OWKMeans(widget.OWWidget):
         table.setShowGrid(False)
         box.layout().addWidget(table)
 
+        self.apply_button = gui.auto_apply(self.buttonsArea, self, "auto_commit",
+                                           commit=self.commit)
+
     def adjustSize(self):
         self.ensurePolished()
         s = self.sizeHint()
@@ -236,24 +255,24 @@ class OWKMeans(widget.OWWidget):
 
     def update_method(self):
         self.table_model.clear_scores()
-        self.commit()
+        self.commit.deferred()
 
     def update_k(self):
         self.optimize_k = False
         self.table_model.clear_scores()
-        self.commit()
+        self.commit.deferred()
 
     def update_from(self):
         self.k_to = max(self.k_from + 1, self.k_to)
         self.optimize_k = True
         self.table_model.clear_scores()
-        self.commit()
+        self.commit.deferred()
 
     def update_to(self):
         self.k_from = min(self.k_from, self.k_to - 1)
         self.optimize_k = True
         self.table_model.clear_scores()
-        self.commit()
+        self.commit.deferred()
 
     def enough_data_instances(self, k):
         """k cannot be larger than the number of data instances."""
@@ -264,15 +283,27 @@ class OWKMeans(widget.OWWidget):
         return len(self.data.domain.attributes)
 
     @staticmethod
-    def _compute_clustering(data, k, init, n_init, max_iter, silhouette, random_state):
+    def _compute_clustering(data, k, init, n_init, max_iter, random_state):
         # type: (Table, int, str, int, int, bool) -> KMeansModel
         if k > len(data):
             raise NotEnoughData()
 
-        return KMeans(
+        model = KMeans(
             n_clusters=k, init=init, n_init=n_init, max_iter=max_iter,
-            compute_silhouette_score=silhouette, random_state=random_state,
-        )(data)
+            random_state=random_state, preprocessors=[]
+        ).get_model(data)
+
+        if data.X.shape[0] <= SILHOUETTE_MAX_SAMPLES:
+            model.silhouette_samples = silhouette_samples(data.X, model.labels)
+            model.silhouette = np.mean(model.silhouette_samples)
+        else:
+            model.silhouette_samples = None
+            model.silhouette = \
+                silhouette_score(data.X, model.labels,
+                                 sample_size=SILHOUETTE_MAX_SAMPLES,
+                                 random_state=RANDOM_STATE)
+
+        return model
 
     @Slot(int, int)
     def __progress_changed(self, n, d):
@@ -309,7 +340,7 @@ class OWKMeans(widget.OWWidget):
         assert self.data is not None
 
         self.__task = None
-        self.setBlocking(False)
+        self.setInvalidated(False)
         self.progressBarFinished()
 
         if self.optimize_k:
@@ -325,14 +356,14 @@ class OWKMeans(widget.OWWidget):
     def __launch_tasks(self, ks):
         # type: (List[int]) -> None
         """Execute clustering in separate threads for all given ks."""
+        preprocessed_data = self.preproces(self.data)
         futures = [self.__executor.submit(
             self._compute_clustering,
-            data=self.data,
+            data=preprocessed_data,
             k=k,
             init=self.INIT_METHODS[self.smart_init][1],
             n_init=self.n_init,
             max_iter=self.max_iterations,
-            silhouette=True,
             random_state=RANDOM_STATE,
         ) for k in ks]
         watcher = FutureSetWatcher(futures)
@@ -342,8 +373,8 @@ class OWKMeans(widget.OWWidget):
         watcher.doneAll.connect(self.__commit_finished)
 
         self.__task = Task(futures, watcher)
-        self.progressBarInit(processEvents=False)
-        self.setBlocking(True)
+        self.progressBarInit()
+        self.setInvalidated(True)
 
     def cancel(self):
         if self.__task is not None:
@@ -356,7 +387,7 @@ class OWKMeans(widget.OWWidget):
             task.watcher.doneAll.disconnect(self.__commit_finished)
 
             self.progressBarFinished()
-            self.setBlocking(False)
+            self.setInvalidated(False)
 
     def run_optimization(self):
         if not self.enough_data_instances(self.k_from):
@@ -390,6 +421,7 @@ class OWKMeans(widget.OWWidget):
 
         self.__launch_tasks([self.k])
 
+    @gui.deferred
     def commit(self):
         self.cancel()
         self.clear_messages()
@@ -399,8 +431,12 @@ class OWKMeans(widget.OWWidget):
         # cause flickering when the clusters are computed quickly, so this is
         # the better alternative
         self.table_model.clear_scores()
-        self.mainArea.setVisible(self.optimize_k and self.data is not None and
-                                 self.has_attributes)
+        if self.optimize_k and self.data is not None and self.has_attributes:
+            self.mainArea.setVisible(True)
+            self.left_side.setContentsMargins(0, 0, 0, 0)
+        else:
+            self.mainArea.setVisible(False)
+            self.left_side.setContentsMargins(0, 0, 4, 0)
 
         if self.data is None:
             self.send_data()
@@ -418,36 +454,56 @@ class OWKMeans(widget.OWWidget):
 
         QTimer.singleShot(100, self.adjustSize)
 
-    def invalidate(self):
+    def invalidate(self, unconditional=False):
         self.cancel()
         self.Error.clear()
         self.Warning.clear()
         self.clusterings = {}
         self.table_model.clear_scores()
 
-        self.commit()
+        if unconditional:
+            self.commit.now()
+        else:
+            self.commit.deferred()
 
     def update_results(self):
-        scores = [
-            mk if isinstance(mk, str) else mk.silhouette for mk in (
-                self.clusterings[k] for k in range(self.k_from, self.k_to + 1))
-        ]
+        scores = [mk if isinstance(mk, str) else mk.silhouette for mk in
+                  (self.clusterings[k] for k in range(self.k_from, self.k_to + 1))]
         best_row = max(
             range(len(scores)), default=0,
             key=lambda x: 0 if isinstance(scores[x], str) else scores[x]
         )
         self.table_model.set_scores(scores, self.k_from)
-        self.table_view.selectRow(best_row)
+        self.apply_selection(best_row)
         self.table_view.setFocus(Qt.OtherFocusReason)
         self.table_view.resizeRowsToContents()
 
+    def apply_selection(self, best_row):
+        pending = best_row
+        if self.__pending_selection is not None:
+            pending = self.__pending_selection
+            self.__pending_selection = None
+        self.table_view.selectRow(pending)
+
     def selected_row(self):
         indices = self.table_view.selectedIndexes()
-        if indices:
-            return indices[0].row()
+        if not indices:
+            return None
+        return indices[0].row()
 
     def select_row(self):
+        self.selection = self.selected_row()
         self.send_data()
+
+    def preproces(self, data):
+        if self.normalize:
+            if sp.issparse(data.X):
+                self.Warning.no_sparse_normalization()
+            else:
+                data = Normalize()(data)
+        for preprocessor in KMeans.preprocessors:  # use same preprocessors than
+            data = preprocessor(data)
+        return data
 
     def send_data(self):
         if self.optimize_k:
@@ -467,22 +523,55 @@ class OWKMeans(widget.OWWidget):
             get_unique_names(domain, "Cluster"),
             values=["C%d" % (x + 1) for x in range(km.k)]
         )
-        clust_ids = km(self.data)
+        clust_ids = km.labels
         silhouette_var = ContinuousVariable(
             get_unique_names(domain, "Silhouette"))
         if km.silhouette_samples is not None:
             self.Warning.no_silhouettes.clear()
             scores = np.arctan(km.silhouette_samples) / np.pi + 0.5
+            clust_scores = []
+            for i in range(km.k):
+                in_clust = clust_ids == i
+                if in_clust.any():
+                    clust_scores.append(np.mean(scores[in_clust]))
+                else:
+                    clust_scores.append(0.)
+            clust_scores = np.atleast_2d(clust_scores).T
         else:
             self.Warning.no_silhouettes()
             scores = np.nan
+            clust_scores = np.full((km.k, 1), np.nan)
 
         new_domain = add_columns(domain, metas=[cluster_var, silhouette_var])
         new_table = self.data.transform(new_domain)
-        new_table.get_column_view(cluster_var)[0][:] = clust_ids.X.ravel()
-        new_table.get_column_view(silhouette_var)[0][:] = scores
+        with new_table.unlocked(new_table.metas):
+            new_table.get_column_view(cluster_var)[0][:] = clust_ids
+            new_table.get_column_view(silhouette_var)[0][:] = scores
 
-        centroids = Table(Domain(km.pre_domain.attributes), km.centroids)
+        domain_attributes = set(domain.attributes)
+        centroid_attributes = [
+            attr.compute_value.variable
+            if isinstance(attr.compute_value, ReplaceUnknowns)
+            and attr.compute_value.variable in domain_attributes
+            else attr
+            for attr in km.domain.attributes]
+        centroid_domain = add_columns(
+            Domain(centroid_attributes, [], domain.metas),
+            metas=[cluster_var, silhouette_var])
+        # Table is constructed from a copy of centroids: if data is stored in
+        # the widget, it can be modified, so the widget should preferrably
+        # output a copy. The number of centroids is small, hence copying it is
+        # cheap.
+        centroids = Table(
+            centroid_domain, km.centroids.copy(), None,
+            np.hstack((np.full((km.k, len(domain.metas)), np.nan),
+                       np.arange(km.k).reshape(km.k, 1),
+                       clust_scores))
+        )
+        if self.data.name == Table.name:
+            centroids.name = "centroids"
+        else:
+            centroids.name = f"{self.data.name} centroids"
 
         self.Outputs.annotated_data.send(new_table)
         self.Outputs.centroids.send(centroids)
@@ -491,13 +580,16 @@ class OWKMeans(widget.OWWidget):
     @check_sql_input
     def set_data(self, data):
         self.data, old_data = data, self.data
+        self.selection = None
+        self.controls.normalize.setDisabled(
+            bool(self.data) and sp.issparse(self.data.X))
 
         # Do not needlessly recluster the data if X hasn't changed
-        if old_data and self.data and np.array_equal(self.data.X, old_data.X):
+        if old_data and self.data and array_equal(self.data.X, old_data.X):
             if self.auto_commit:
                 self.send_data()
         else:
-            self.invalidate()
+            self.invalidate(unconditional=True)
 
     def send_report(self):
         # False positives (Setting is not recognized as int)
@@ -525,4 +617,4 @@ class OWKMeans(widget.OWWidget):
 
 
 if __name__ == "__main__":  # pragma: no cover
-    WidgetPreview(OWKMeans).run(Table("iris.tab"))
+    WidgetPreview(OWKMeans).run(Table("heart_disease"))

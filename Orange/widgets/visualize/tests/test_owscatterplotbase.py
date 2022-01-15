@@ -1,5 +1,6 @@
 # pylint: disable=missing-docstring,too-many-lines,too-many-public-methods
 # pylint: disable=protected-access
+from itertools import count
 from unittest.mock import patch, Mock
 import numpy as np
 
@@ -7,12 +8,12 @@ from AnyQt.QtCore import QRectF, Qt
 from AnyQt.QtGui import QColor
 from AnyQt.QtTest import QSignalSpy
 
-from pyqtgraph import mkPen
+from pyqtgraph import mkPen, mkBrush
 
+from orangewidget.tests.base import GuiTest
 from Orange.widgets.settings import SettingProvider
 from Orange.widgets.tests.base import WidgetTest
-from Orange.widgets.utils.colorpalette import ColorPaletteGenerator, \
-    ContinuousPaletteGenerator, NAN_GREY
+from Orange.widgets.utils import colorpalettes
 from Orange.widgets.visualize.owscatterplotgraph import OWScatterPlotBase, \
     ScatterPlotItem, SELECTION_WIDTH
 from Orange.widgets.widget import OWWidget
@@ -41,22 +42,39 @@ class MockWidget(OWWidget):
 
     def get_palette(self):
         if self.is_continuous_color():
-            return ContinuousPaletteGenerator(Qt.white, Qt.black, False)
+            return colorpalettes.DefaultContinuousPalette
         else:
-            return ColorPaletteGenerator(12)
+            return colorpalettes.DefaultDiscretePalette
+
+    @staticmethod
+    def reset_mocks():
+        for m in MockWidget.__dict__.values():
+            if isinstance(m, Mock):
+                m.reset_mock()
 
 
 class TestOWScatterPlotBase(WidgetTest):
     def setUp(self):
+        super().setUp()
         self.master = MockWidget()
         self.graph = OWScatterPlotBase(self.master)
 
         self.xy = (np.arange(10, dtype=float), np.arange(10, dtype=float))
         self.master.get_coordinates_data = lambda: self.xy
 
+    def tearDown(self):
+        self.master.onDeleteWidget()
+        self.master.deleteLater()
+        # Clear mocks as they keep ref to widget instance when called
+        MockWidget.reset_mocks()
+        del self.master
+        del self.graph
+        super().tearDown()
+
     # pylint: disable=keyword-arg-before-vararg
     def setRange(self, rect=None, *_, **__):
         if isinstance(rect, QRectF):
+            # pylint: disable=attribute-defined-outside-init
             self.last_setRange = [[rect.left(), rect.right()],
                                   [rect.top(), rect.bottom()]]
 
@@ -85,7 +103,7 @@ class TestOWScatterPlotBase(WidgetTest):
         scatterplot_item.setSize([5, 6])
         scatterplot_item.setSymbol([7, 8])
         scatterplot_item.setPen([mkPen(9), mkPen(10)])
-        scatterplot_item.setBrush([11, 12])
+        scatterplot_item.setBrush([mkBrush(11), mkBrush(12)])
         data["data"] = np.array([13, 14])
 
         xy[0][0] = 0
@@ -100,7 +118,8 @@ class TestOWScatterPlotBase(WidgetTest):
         np.testing.assert_almost_equal(data["symbol"], [7, 8])
         self.assertEqual(data["pen"][0], mkPen(9))
         self.assertEqual(data["pen"][1], mkPen(10))
-        np.testing.assert_almost_equal(data["brush"], [11, 12])
+        self.assertEqual(data["brush"][0], mkBrush(11))
+        self.assertEqual(data["brush"][1], mkBrush(12))
         np.testing.assert_almost_equal(data["data"], [13, 14])
 
     def test_update_coordinates_and_labels(self):
@@ -112,9 +131,9 @@ class TestOWScatterPlotBase(WidgetTest):
         xy[0][0] = 1.5
         graph.update_coordinates()
         self.assertEqual(graph.labels[0].pos().x(), 1.5)
-        xy[0][0] = 0  # This label goes out of the range
+        xy[0][0] = 0  # This label goes out of the range; reset puts it back
         graph.update_coordinates()
-        self.assertEqual(graph.labels[0].pos().x(), 2)
+        self.assertEqual(graph.labels[0].pos().x(), 0)
 
     def test_update_coordinates_and_density(self):
         graph = self.graph
@@ -163,7 +182,7 @@ class TestOWScatterPlotBase(WidgetTest):
                         np.arange(0, 30, 3, dtype=float))
         d = np.arange(10, dtype=float)
         master.get_size_data = lambda: d
-        master.get_shape_data = lambda: d
+        master.get_shape_data = lambda: d % 5 if d is not None else None
         master.get_color_data = lambda: d
         master.get_label_data = lambda: \
             np.array([str(x) for x in d], dtype=object)
@@ -187,7 +206,7 @@ class TestOWScatterPlotBase(WidgetTest):
             (x[2] - x[1]) / (x[1] - x[0]))
         self.assertEqual(
             list(data["symbol"]),
-            [graph.CurveSymbols[int(xi)] for xi in x])
+            [graph.CurveSymbols[int(xi) % 5] for xi in x])
         self.assertEqual(
             [pen.color().hue() for pen in data["pen"]],
             [graph.palette[xi].hue() for xi in x])
@@ -202,16 +221,12 @@ class TestOWScatterPlotBase(WidgetTest):
         scatterplot_item = graph.scatterplot_item
         x, y = scatterplot_item.getData()
         data = scatterplot_item.data
-        s0, s1, s2, s3 = data["size"] - graph.MinShapeSize
-        np.testing.assert_almost_equal(
-            (s2 - s1) / (s1 - s0),
-            (x[2] - x[1]) / (x[1] - x[0]))
-        np.testing.assert_almost_equal(
-            (s2 - s1) / (s1 - s3),
-            (x[2] - x[1]) / (x[1] - x[3]))
+        s = data["size"] - graph.MinShapeSize
+        precise_s = (x - min(x)) / (max(x) - min(x)) * max(s)
+        np.testing.assert_almost_equal(s, precise_s, decimal=0)
         self.assertEqual(
             list(data["symbol"]),
-            [graph.CurveSymbols[int(xi)] for xi in x])
+            [graph.CurveSymbols[int(xi) % 5] for xi in x])
         self.assertEqual(
             [pen.color().hue() for pen in data["pen"]],
             [graph.palette[xi].hue() for xi in x])
@@ -228,7 +243,7 @@ class TestOWScatterPlotBase(WidgetTest):
         np.testing.assert_almost_equal(y, xy[1])
         self.assertEqual(
             list(data["symbol"]),
-            [graph.CurveSymbols[int(xi)] for xi in d])
+            [graph.CurveSymbols[int(xi) % 5] for xi in d])
         self.assertEqual(
             [pen.color().hue() for pen in data["pen"]],
             [graph.palette[xi].hue() for xi in d])
@@ -249,7 +264,7 @@ class TestOWScatterPlotBase(WidgetTest):
             (x[2] - x[1]) / (x[1] - x[0]))
         self.assertEqual(
             list(data["symbol"]),
-            [graph.CurveSymbols[int(xi)] for xi in x])
+            [graph.CurveSymbols[int(xi) % 5] for xi in x])
         self.assertEqual(
             [pen.color().hue() for pen in data["pen"]],
             [graph.palette[xi].hue() for xi in x])
@@ -311,12 +326,13 @@ class TestOWScatterPlotBase(WidgetTest):
 
     base = "Orange.widgets.visualize.owscatterplotgraph.OWScatterPlotBase."
 
+    @staticmethod
     @patch(base + "update_sizes")
     @patch(base + "update_colors")
     @patch(base + "update_selection_colors")
     @patch(base + "update_shapes")
     @patch(base + "update_labels")
-    def test_reset_calls_all_updates_and_update_doesnt(self, *mocks):
+    def test_reset_calls_all_updates_and_update_doesnt(*mocks):
         master = MockWidget()
         graph = OWScatterPlotBase(master)
         for mock in mocks:
@@ -349,6 +365,29 @@ class TestOWScatterPlotBase(WidgetTest):
         x, y = scatterplot_item.getData()
         np.testing.assert_equal(a10, x)
 
+    def test_suspend_jittering(self):
+        graph = self.graph
+        graph.jitter_size = 10
+        graph.reset_graph()
+        uj = graph.update_jittering = Mock()
+        graph.unsuspend_jittering()
+        uj.assert_not_called()
+        graph.suspend_jittering()
+        uj.assert_called()
+        uj.reset_mock()
+        graph.suspend_jittering()
+        uj.assert_not_called()
+        graph.unsuspend_jittering()
+        uj.assert_called()
+        uj.reset_mock()
+
+        graph.jitter_size = 0
+        graph.reset_graph()
+        graph.suspend_jittering()
+        uj.assert_not_called()
+        graph.unsuspend_jittering()
+        uj.assert_not_called()
+
     def test_size_normalization(self):
         graph = self.graph
 
@@ -358,16 +397,24 @@ class TestOWScatterPlotBase(WidgetTest):
         graph.reset_graph()
         scatterplot_item = graph.scatterplot_item
         size = scatterplot_item.data["size"]
-        diffs = [round(y - x, 2) for x, y in zip(size, size[1:])]
-        self.assertEqual(len(set(diffs)), 1)
-        self.assertGreater(diffs[0], 0)
+        np.testing.assert_equal(size, [6, 7.5, 9.5, 11, 12.5, 14.5, 16, 17.5, 19.5, 21])
 
         d = np.arange(10, 20, dtype=float)
         graph.update_sizes()
         self.assertIs(scatterplot_item, graph.scatterplot_item)
+        size2 = scatterplot_item.data["size"]
+        np.testing.assert_equal(size, size2)
+
+    def test_size_rounding_half_pixel(self):
+        graph = self.graph
+
+        self.master.get_size_data = lambda: d
+        d = np.arange(10, dtype=float)
+
+        graph.reset_graph()
+        scatterplot_item = graph.scatterplot_item
         size = scatterplot_item.data["size"]
-        diffs2 = [round(y - x, 2) for x, y in zip(size, size[1:])]
-        self.assertEqual(diffs, diffs2)
+        np.testing.assert_equal(size*2 - (size*2).round(), 0)
 
     def test_size_with_nans(self):
         graph = self.graph
@@ -438,6 +485,7 @@ class TestOWScatterPlotBase(WidgetTest):
 
         graph = self.graph
 
+        # pylint: disable=attribute-defined-outside-init
         self.master.get_size_data = lambda: d
         self.master.impute_sizes = impute_max
         d = np.arange(10, dtype=float)
@@ -455,6 +503,35 @@ class TestOWScatterPlotBase(WidgetTest):
             - graph.scatterplot_item.data["size"],
             SELECTION_WIDTH)
 
+    @patch("Orange.widgets.visualize.owscatterplotgraph"
+           ".MAX_N_VALID_SIZE_ANIMATE", 5)
+    def test_size_animation(self):
+        begin_resizing = QSignalSpy(self.graph.begin_resizing)
+        step_resizing = QSignalSpy(self.graph.step_resizing)
+        end_resizing = QSignalSpy(self.graph.end_resizing)
+        self._update_sizes_for_points(5)
+        # first end_resizing is triggered in reset, thus wait for step_resizing
+        step_resizing.wait(200)
+        end_resizing.wait(200)
+        self.assertEqual(len(begin_resizing), 2)  # reset and update
+        self.assertEqual(len(step_resizing), 9)
+        self.assertEqual(len(end_resizing), 2)  # reset and update
+        self.assertEqual(self.graph.scatterplot_item.setSize.call_count, 10)
+        self._update_sizes_for_points(10)
+        self.graph.scatterplot_item.setSize.assert_called_once()
+
+    def _update_sizes_for_points(self, n: int):
+        arr = np.arange(n, dtype=float)
+        self.master.get_coordinates_data = lambda: (arr, arr)
+        self.master.get_size_data = lambda: arr
+        self.graph.reset_graph()
+        self.graph.scatterplot_item.setSize = Mock(
+            wraps=self.graph.scatterplot_item.setSize)
+        self.master.get_size_data = lambda: arr[::-1]
+        self.graph.update_sizes()
+        self.process_events(until=lambda: not (
+            self.graph.timer is not None and self.graph.timer.isActive()))
+
     def test_colors_discrete(self):
         self.master.is_continuous_color = lambda: False
         palette = self.master.get_palette()
@@ -464,12 +541,17 @@ class TestOWScatterPlotBase(WidgetTest):
         d = np.arange(10, dtype=float) % 2
 
         graph.reset_graph()
+        data = graph.scatterplot_item.data
         self.assertTrue(
             all(pen.color().hue() is palette[i % 2].hue()
-                for i, pen in enumerate(graph.scatterplot_item.data["pen"])))
+                for i, pen in enumerate(data["pen"])))
         self.assertTrue(
             all(pen.color().hue() is palette[i % 2].hue()
-                for i, pen in enumerate(graph.scatterplot_item.data["brush"])))
+                for i, pen in enumerate(data["brush"])))
+
+        # confirm that QPen/QBrush were reused
+        self.assertEqual(len(set(map(id, data["pen"]))), 2)
+        self.assertEqual(len(set(map(id, data["brush"]))), 2)
 
     def test_colors_discrete_nan(self):
         self.master.is_continuous_color = lambda: False
@@ -500,6 +582,24 @@ class TestOWScatterPlotBase(WidgetTest):
         d[4] = np.nan
         graph.update_colors()  # Ditto
 
+    def test_colors_continuous_reused(self):
+        self.master.is_continuous_color = lambda: True
+        graph = self.graph
+
+        self.xy = (np.arange(100, dtype=float),
+                   np.arange(100, dtype=float))
+
+        d = np.arange(100, dtype=float)
+        self.master.get_color_data = lambda: d
+        graph.reset_graph()
+
+        data = graph.scatterplot_item.data
+
+        self.assertEqual(len(data["pen"]), 100)
+        self.assertLessEqual(len(set(map(id, data["pen"]))), 10)
+        self.assertEqual(len(data["brush"]), 100)
+        self.assertLessEqual(len(set(map(id, data["brush"]))), 10)
+
     def test_colors_continuous_nan(self):
         self.master.is_continuous_color = lambda: True
         graph = self.graph
@@ -510,7 +610,7 @@ class TestOWScatterPlotBase(WidgetTest):
         graph.reset_graph()
         pens = graph.scatterplot_item.data["pen"]
         brushes = graph.scatterplot_item.data["brush"]
-        nan_color = QColor(*NAN_GREY)
+        nan_color = QColor(*colorpalettes.NAN_COLOR)
         self.assertEqual(pens[4].color().hue(), nan_color.hue())
         self.assertEqual(brushes[4].color().hue(), nan_color.hue())
 
@@ -535,12 +635,12 @@ class TestOWScatterPlotBase(WidgetTest):
             self.master.get_subset_mask = lambda: np.arange(10) >= 5
             graph.update_colors()
             brushes = graph.scatterplot_item.data["brush"]
-            self.assertEqual(brushes[0].color().alpha(), 0)
-            self.assertEqual(brushes[1].color().alpha(), 0)
-            self.assertEqual(brushes[4].color().alpha(), 0)
-            self.assertEqual(brushes[5].color().alpha(), 255)
-            self.assertEqual(brushes[6].color().alpha(), 255)
-            self.assertEqual(brushes[7].color().alpha(), 255)
+            a0 = brushes[0].color().alpha()
+            self.assertEqual(brushes[1].color().alpha(), a0)
+            self.assertEqual(brushes[4].color().alpha(), a0)
+            self.assertGreater(brushes[5].color().alpha(), a0)
+            self.assertGreater(brushes[6].color().alpha(), a0)
+            self.assertGreater(brushes[7].color().alpha(), a0)
 
         graph = self.graph
 
@@ -573,12 +673,16 @@ class TestOWScatterPlotBase(WidgetTest):
         data = graph.scatterplot_item.data
         self.assertTrue(all(pen.color().hue() == hue for pen in data["pen"]))
         self.assertTrue(all(pen.color().hue() == hue for pen in data["brush"]))
+        self.assertEqual(len(set(map(id, data["pen"]))), 1)  # test QPen/QBrush reuse
+        self.assertEqual(len(set(map(id, data["brush"]))), 1)
 
         self.master.get_subset_mask = lambda: np.arange(10) < 5
         graph.update_colors()
         data = graph.scatterplot_item.data
         self.assertTrue(all(pen.color().hue() == hue for pen in data["pen"]))
         self.assertTrue(all(pen.color().hue() == hue for pen in data["brush"]))
+        self.assertEqual(len(set(map(id, data["pen"]))), 1)
+        self.assertEqual(len(set(map(id, data["brush"]))), 2)  # transparent and colored
 
     def test_colors_update_legend_and_density(self):
         graph = self.graph
@@ -641,6 +745,127 @@ class TestOWScatterPlotBase(WidgetTest):
             else:
                 self.assertEqual(pen.style(), Qt.NoPen)
 
+    def test_z_values(self):
+        def check_ranks(exp_ranks):
+            z = set_z.call_args[0][0]
+            self.assertEqual(len(z), len(exp_ranks))
+            for i, exp1, z1 in zip(count(), exp_ranks, z):
+                for j, exp2, z2 in zip(range(i), exp_ranks, z):
+                    if exp1 != exp2:
+                        self.assertEqual(exp1 < exp2, z1 < z2,
+                                         f"error at pair ({j}, {i})")
+
+        colors = np.array([0, 1, 1, 0, np.nan, 2, 2, 2, 1, 1])
+        self.master.get_color_data = lambda: colors
+        self.master.is_continuous_color = lambda: False
+
+        graph = self.graph
+        with patch.object(ScatterPlotItem, "setZ") as set_z:
+            # Just colors
+            graph.reset_graph()
+            check_ranks([3, 1, 1, 3, 0, 2, 2, 2, 1, 1])
+
+            # Colors and selection
+            graph.selection_select([1, 5])
+            check_ranks([3, 11, 1, 3, 0, 12, 2, 2, 1, 1])
+
+            # Colors and selection, and nan is selected
+            graph.selection_append([4])
+            check_ranks([3, 11, 1, 3, 10, 12, 2, 2, 1, 1])
+
+            # Just colors again, no selection
+            graph.selection_select([])
+            check_ranks([3, 1, 1, 3, 0, 2, 2, 2, 1, 1])
+
+            # Colors and subset
+            self.master.get_subset_mask = \
+                lambda: np.array([True, True, False, False, True] * 2)
+            graph.update_colors()  # selecting subset triggers update_colors
+            check_ranks([23, 21, 1, 3, 20, 22, 22, 2, 1, 21])
+
+            # Colors, subset and selection
+            graph.selection_select([1, 5])
+            check_ranks([23, 31, 1, 3, 20, 32, 22, 2, 1, 21])
+
+            # Continuous colors
+            self.master.is_continuous_color = lambda: True
+            graph.update_colors()
+            check_ranks([20, 30, 0, 0, 20, 30, 20, 0, 0, 20])
+
+            # No colors => just subset and selection
+            # pylint: disable=attribute-defined-outside-init
+            self.master.get_colors = lambda: None
+            graph.update_colors()
+            check_ranks([20, 30, 0, 0, 20, 30, 20, 0, 0, 20])
+
+            # No selection or subset, but continuous colors with nan
+            graph.selection_select([1, 5])
+            self.master.get_subset_mask = lambda: None
+            self.master.get_color_data = lambda: colors
+            graph.update_colors()
+            check_ranks(np.isfinite(colors))
+
+    def test_z_values_with_sample(self):
+        def check_ranks(exp_ranks):
+            z = set_z.call_args[0][0]
+            self.assertEqual(len(z), len(exp_ranks))
+            for i, exp1, z1 in zip(count(), exp_ranks, z):
+                for j, exp2, z2 in zip(range(i), exp_ranks, z):
+                    if exp1 != exp2:
+                        self.assertEqual(exp1 < exp2, z1 < z2,
+                                         f"error at pair ({j}, {i})")
+
+        def create_sample():
+            graph.sample_indices = np.array([0, 1, 3, 4, 5, 6, 7, 8, 9])
+            graph.n_shown = 9
+
+        graph = self.graph
+        graph.sample_size = 9
+        graph._create_sample = create_sample
+
+        self.master.is_continuous_color = lambda: False
+        self.master.get_color_data = \
+            lambda: np.array([0, 1, 1, 0, np.nan, 2, 2, 2, 1, 1])
+
+        with patch.object(ScatterPlotItem, "setZ") as set_z:
+            # Just colors
+            graph.reset_graph()
+            check_ranks([3, 1, 3, 0, 2, 2, 2, 1, 1])
+
+            # Colors and selection
+            graph.selection_select([1, 5])
+            check_ranks([3, 11, 3, 0, 12, 2, 2, 1, 1])
+
+            # Colors and selection, and nan is selected
+            graph.selection_append([4])
+            check_ranks([3, 11, 3, 10, 12, 2, 2, 1, 1])
+
+            # Just colors again, no selection
+            graph.selection_select([])
+            check_ranks([3, 1, 3, 0, 2, 2, 2, 1, 1])
+
+            # Colors and subset
+            self.master.get_subset_mask = \
+                lambda: np.array([True, True, False, False, True] * 2)
+            graph.update_colors()  # selecting subset triggers update_colors
+            check_ranks([23, 21, 3, 20, 22, 22, 2, 1, 21])
+
+            # Colors, subset and selection
+            graph.selection_select([1, 5])
+            check_ranks([23, 31, 3, 20, 32, 22, 2, 1, 21])
+
+            # Continuous colors => just subset and selection
+            self.master.is_continuous_color = lambda: False
+            graph.update_colors()
+            check_ranks([20, 30, 0, 20, 30, 20, 0, 0, 20])
+
+            # No colors => just subset and selection
+            self.master.is_continuous_color = lambda: True
+            # pylint: disable=attribute-defined-outside-init
+            self.master.get_colors = lambda: None
+            graph.update_colors()
+            check_ranks([20, 30, 0, 20, 30, 20, 0, 0, 20])
+
     def test_density(self):
         graph = self.graph
         density = object()
@@ -680,6 +905,81 @@ class TestOWScatterPlotBase(WidgetTest):
             graph.reset_graph()
             self.assertIsNone(graph.density_img)
             self.assertIs(graph.plot_widget.removeItem.call_args[0][0], density)
+
+    @patch("Orange.widgets.utils.classdensity.class_density_image")
+    def test_density_with_missing(self, class_density_image):
+        graph = self.graph
+        graph.reset_graph()
+        graph.plot_widget.addItem = Mock()
+        graph.plot_widget.removeItem = Mock()
+
+        graph.class_density = True
+        d = np.arange(10, dtype=float) % 2
+        self.master.get_color_data = lambda: d
+
+        # All colors known
+        graph.update_colors()
+        x_data0, y_data0, colors0 = class_density_image.call_args[0][5:]
+
+        # Some missing colors
+        d[:3] = np.nan
+        graph.update_colors()
+        x_data, y_data, colors = class_density_image.call_args[0][5:]
+        np.testing.assert_equal(x_data, x_data0[3:])
+        np.testing.assert_equal(y_data, y_data0[3:])
+        np.testing.assert_equal(colors, colors0[3:])
+
+        # Missing colors + only subsample plotted
+        graph.set_sample_size(8)
+        graph.reset_graph()
+        d_known = np.isfinite(graph._filter_visible(d))
+        x_data0 = graph._filter_visible(x_data0)[d_known]
+        y_data0 = graph._filter_visible(y_data0)[d_known]
+        colors0 = graph._filter_visible(np.array(colors0))[d_known]
+        x_data, y_data, colors = class_density_image.call_args[0][5:]
+        np.testing.assert_equal(x_data, x_data0)
+        np.testing.assert_equal(y_data, y_data0)
+        np.testing.assert_equal(colors, colors0)
+
+    @patch("Orange.widgets.visualize.owscatterplotgraph.MAX_COLORS", 3)
+    @patch("Orange.widgets.utils.classdensity.class_density_image")
+    def test_density_with_max_colors(self, class_density_image):
+        graph = self.graph
+        graph.reset_graph()
+        graph.plot_widget.addItem = Mock()
+        graph.plot_widget.removeItem = Mock()
+
+        graph.class_density = True
+        d = np.arange(10, dtype=float) % 3
+        self.master.get_color_data = lambda: d
+
+        # All colors known
+        graph.update_colors()
+        x_data, y_data, colors = class_density_image.call_args[0][5:]
+        np.testing.assert_equal(x_data, np.arange(10)[d < 2])
+        np.testing.assert_equal(y_data, np.arange(10)[d < 2])
+        self.assertEqual(len(set(colors)), 2)
+
+        # Missing colors
+        d[:3] = np.nan
+        graph.update_colors()
+        x_data, y_data, colors = class_density_image.call_args[0][5:]
+        np.testing.assert_equal(x_data, np.arange(3, 10)[d[3:] < 2])
+        np.testing.assert_equal(y_data, np.arange(3, 10)[d[3:] < 2])
+        self.assertEqual(len(set(colors)), 2)
+
+        # Missing colors + only subsample plotted
+        graph.set_sample_size(8)
+        graph.reset_graph()
+        x_data, y_data, colors = class_density_image.call_args[0][5:]
+        visible_data = graph._filter_visible(d)
+        d_known = np.bitwise_and(np.isfinite(visible_data),
+                                  visible_data < 2)
+        x_data0 = graph._filter_visible(np.arange(10))[d_known]
+        y_data0 = graph._filter_visible(np.arange(10))[d_known]
+        np.testing.assert_equal(x_data, x_data0)
+        np.testing.assert_equal(y_data, y_data0)
+        self.assertLessEqual(len(set(colors)), 2)
 
     def test_labels(self):
         graph = self.graph
@@ -986,6 +1286,7 @@ class TestOWScatterPlotBase(WidgetTest):
         def impute0(data, _):
             data[np.isnan(data)] = 0
 
+        # pylint: disable=attribute-defined-outside-init
         self.master.impute_shapes = impute0
         d = np.arange(10, dtype=float) % 3
         d[2] = np.nan
@@ -1017,6 +1318,7 @@ class TestOWScatterPlotBase(WidgetTest):
             for color_labels in (None, ["c", "d"], None):
                 for visible in (True, False, True):
                     graph.show_legend = visible
+                    graph.palette = graph.master.get_palette()
                     graph.update_legends()
                     self.assertIs(
                         shape_legend.call_args[0][0],
@@ -1045,6 +1347,10 @@ class TestOWScatterPlotBase(WidgetTest):
     def test_legend_combine(self):
         master = self.master
         graph = self.graph
+
+        master.get_shape_data = lambda: np.arange(10, dtype=float) % 3
+        master.get_color_data = lambda: 2 * np.arange(10, dtype=float) % 3
+
         graph.reset_graph()
 
         shape_legend = self.graph.shape_legend.setVisible = Mock()
@@ -1059,11 +1365,18 @@ class TestOWScatterPlotBase(WidgetTest):
         master.get_color_labels = lambda: ["a", "b"]
         graph.update_legends()
         self.assertTrue(shape_legend.call_args[0][0])
+        self.assertTrue(color_legend.call_args[0][0])
+        self.assertEqual(len(graph.shape_legend.items), 2)
+
+        master.get_color_data = lambda: np.arange(10, dtype=float) % 3
+        graph.update_legends()
+        self.assertTrue(shape_legend.call_args[0][0])
         self.assertFalse(color_legend.call_args[0][0])
         self.assertEqual(len(graph.shape_legend.items), 2)
 
         master.is_continuous_color = lambda: True
         master.get_color_data = lambda: np.arange(10, dtype=float)
+        master.get_color_labels = lambda: None
         graph.update_colors()
         self.assertTrue(shape_legend.call_args[0][0])
         self.assertTrue(color_legend.call_args[0][0])
@@ -1216,6 +1529,100 @@ class TestOWScatterPlotBase(WidgetTest):
         graph.clear()
         self.assertFalse(spy[-1][0])
         self.assertFalse(bool(self.graph.labels))
+
+    def test_no_needless_buildatlas(self):
+        graph = self.graph
+        graph.reset_graph()
+        atlas = graph.scatterplot_item.fragmentAtlas
+        if hasattr(atlas, "atlas"):  # pyqtgraph < 0.11.1
+            self.assertIsNone(atlas.atlas)
+        else:
+            self.assertFalse(atlas)
+
+
+class TestScatterPlotItem(GuiTest):
+    def test_setZ(self):
+        """setZ sets the appropriate mapping and inverse mapping"""
+        scp = ScatterPlotItem(x=np.arange(5), y=np.arange(5))
+        scp.setZ(np.array([3.12, 5.2, 1.2, 0, 2.15]))
+        np.testing.assert_equal(scp._z_mapping, [3, 2, 4, 0, 1])
+        np.testing.assert_equal(scp._inv_mapping, [3, 4, 1, 0, 2])
+
+        scp.setZ(None)
+        self.assertIsNone(scp._z_mapping)
+        self.assertIsNone(scp._inv_mapping)
+
+        self.assertRaises(AssertionError, scp.setZ, np.arange(4))
+
+    @staticmethod
+    def test_paint_mapping():
+        """paint permutes the points and reverses the permutation afterwards"""
+        def test_self_data(this, *_, **_1):
+            x, y = this.getData()
+            np.testing.assert_equal(x, exp_x)
+            np.testing.assert_equal(y, exp_y)
+
+        orig_x = np.arange(10, 15)
+        orig_y = np.arange(20, 25)
+        scp = ScatterPlotItem(x=orig_x[:], y=orig_y[:])
+        with patch("pyqtgraph.ScatterPlotItem.paint", new=test_self_data):
+            exp_x = orig_x
+            exp_y = orig_y
+            scp.paint(Mock(), Mock())
+
+            scp._z_mapping = np.array([3, 2, 4, 0, 1])
+            scp._inv_mapping = np.array([3, 4, 1, 0, 2])
+            exp_x = [13, 12, 14, 10, 11]
+            exp_y = [23, 22, 24, 20, 21]
+            scp.paint(Mock(), Mock())
+            x, y = scp.getData()
+            np.testing.assert_equal(x, np.arange(10, 15))
+            np.testing.assert_equal(y, np.arange(20, 25))
+
+    def test_paint_mapping_exception(self):
+        """exception in paint does not leave the points permuted"""
+        orig_x = np.arange(10, 15)
+        orig_y = np.arange(20, 25)
+        scp = ScatterPlotItem(x=orig_x[:], y=orig_y[:])
+        scp._z_mapping = np.array([3, 2, 4, 0, 1])
+        scp._inv_mapping = np.array([3, 4, 1, 0, 2])
+        with patch("pyqtgraph.ScatterPlotItem.paint", side_effect=ValueError):
+            self.assertRaises(ValueError, scp.paint, Mock(), Mock())
+            x, y = scp.getData()
+            np.testing.assert_equal(x, np.arange(10, 15))
+            np.testing.assert_equal(y, np.arange(20, 25))
+
+    @staticmethod
+    def test_paint_mapping_integration():
+        """setZ causes rendering in the appropriate order"""
+        def test_self_data(this, *_, **_1):
+            x, y = this.getData()
+            np.testing.assert_equal(x, exp_x)
+            np.testing.assert_equal(y, exp_y)
+
+        orig_x = np.arange(10, 15)
+        orig_y = np.arange(20, 25)
+        scp = ScatterPlotItem(x=orig_x[:], y=orig_y[:])
+        with patch("pyqtgraph.ScatterPlotItem.paint", new=test_self_data):
+            exp_x = orig_x
+            exp_y = orig_y
+            scp.paint(Mock(), Mock())
+
+            scp.setZ(np.array([3.12, 5.2, 1.2, 0, 2.15]))
+            exp_x = [13, 12, 14, 10, 11]
+            exp_y = [23, 22, 24, 20, 21]
+            scp.paint(Mock(), Mock())
+            x, y = scp.getData()
+            np.testing.assert_equal(x, np.arange(10, 15))
+            np.testing.assert_equal(y, np.arange(20, 25))
+
+            scp.setZ(None)
+            exp_x = orig_x
+            exp_y = orig_y
+            scp.paint(Mock(), Mock())
+            x, y = scp.getData()
+            np.testing.assert_equal(x, np.arange(10, 15))
+            np.testing.assert_equal(y, np.arange(20, 25))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Test methods with long descriptive names can omit docstrings
 # pylint: disable=missing-docstring
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -10,6 +10,9 @@ from Orange.data import (
 )
 from Orange.widgets.tests.base import (
     WidgetTest, WidgetOutputsTestMixin, ProjectionWidgetTestMixin
+)
+from Orange.widgets.utils.colorpalettes import (
+    ContinuousPalettes, DiscretePalette
 )
 from Orange.widgets.visualize.utils.widget import (
     OWDataProjectionWidget, OWProjectionWidgetBase
@@ -61,14 +64,13 @@ class TestOWProjectionWidget(WidgetTest):
         self.assertEqual(get_column(disc3, return_labels=True), disc3.values)
         with self.assertRaises(AssertionError):
             get_column(cont, return_labels=True)
-            get_column(cont, return_labels=True, merge_infrequent=True)
-            get_column(cont, merge_infrequent=True)
+        with self.assertRaises(AssertionError):
+            get_column(cont, return_labels=True, max_categories=4)
         with self.assertRaises(AssertionError):
             get_column(string, return_labels=True)
-            get_column(string, return_labels=True, merge_infrequent=True)
-            get_column(string, merge_infrequent=True)
+        with self.assertRaises(AssertionError):
+            get_column(string, return_labels=True, max_categories=4)
 
-    @patch("Orange.widgets.visualize.utils.widget.MAX_CATEGORIES", 4)
     def test_get_column_merge_infrequent(self):
         widget = self.widget
         get_column = widget.get_column
@@ -88,15 +90,15 @@ class TestOWProjectionWidget(WidgetTest):
         self.assertEqual(get_column(disc2, return_labels=True), disc2.values)
 
         np.testing.assert_almost_equal(
-            get_column(disc, merge_infrequent=True),
+            get_column(disc, max_categories=4),
             [1, 1, 1, 2, 3, 1, 1, 2, 3, 2, 2, 0, 0, 0, 3, 2, 3])
         self.assertEqual(
-            get_column(disc, merge_infrequent=True, return_labels=True),
+            get_column(disc, max_categories=4, return_labels=True),
             [disc.values[0], disc.values[1], disc.values[5], "Other"])
         np.testing.assert_almost_equal(
-            get_column(disc2, merge_infrequent=True), y)
+            get_column(disc2, max_categories=4), y)
         self.assertEqual(
-            get_column(disc2, return_labels=True, merge_infrequent=True),
+            get_column(disc2, return_labels=True, max_categories=4),
             disc2.values)
 
         # Test that get_columns modify a copy of the data and not the data
@@ -113,6 +115,33 @@ class TestOWProjectionWidget(WidgetTest):
                         and "3" in widget.get_tooltip([0, 1]))
         self.assertEqual(widget.get_tooltip([]), "")
 
+    def test_get_palette(self):
+        widget = self.widget
+
+        widget.attr_color = None
+        self.assertIsNone(widget.get_palette())
+
+        var = ContinuousVariable("v")
+        var.palette = Mock()
+        widget.attr_color = var
+        self.assertIs(widget.get_palette(), var.palette)
+
+        var = DiscreteVariable("v", values=tuple("abc"))
+        var.palette = Mock()
+        widget.attr_color = var
+        self.assertIs(widget.get_palette(), var.palette)
+
+        values = tuple("abcdefghijklmn")
+        merged = ["a", "c", "d", "h", "n", "Others"]
+        var = DiscreteVariable("v", values=values)
+        var.palette = DiscretePalette(
+            "foo", "bar", [[i] * 3 for i, _ in enumerate(values)])
+        widget.get_color_labels = lambda: merged
+        widget.attr_color = var
+        np.testing.assert_equal(
+            widget.get_palette().palette[:-1],
+            [[var.values.index(label)] * 3 for label in merged[:-1]])
+
 
 class TestableDataProjectionWidget(OWDataProjectionWidget):
     def get_embedding(self):
@@ -126,10 +155,11 @@ class TestableDataProjectionWidget(OWDataProjectionWidget):
         if not len(x_data[self.valid_data]):
             return None
 
+        x_data = x_data.copy()
         x_data[x_data == np.inf] = np.nan
-        x_data = np.nanmean(x_data[self.valid_data], 1)
+        x_data_ = np.ones(len(x_data))
         y_data = np.ones(len(x_data))
-        return np.vstack((x_data, y_data)).T
+        return np.vstack((x_data_, y_data)).T
 
 
 class TestOWDataProjectionWidget(WidgetTest, ProjectionWidgetTestMixin,
@@ -145,6 +175,16 @@ class TestOWDataProjectionWidget(WidgetTest, ProjectionWidgetTestMixin,
 
     def setUp(self):
         self.widget = self.create_widget(TestableDataProjectionWidget)
+
+    def test_annotation_with_nans(self):
+        data = Table.from_table_rows(self.data, [0, 1, 2])
+        with data.unlocked():
+            data.X[1, :] = np.nan
+        self.send_signal(self.widget.Inputs.data, data)
+        points = self.widget.graph.scatterplot_item.points()
+        self.widget.graph.select_by_click(None, [points[1]])
+        annotated = self.get_output(self.widget.Outputs.annotated_data)
+        np.testing.assert_equal(annotated.get_column_view('Selected')[0], np.array([0, 0, 1]))
 
     def test_saved_selection(self):
         self.send_signal(self.widget.Inputs.data, self.data)
@@ -214,6 +254,30 @@ class TestOWDataProjectionWidget(WidgetTest, ProjectionWidgetTestMixin,
         self.send_signal(self.widget.Inputs.data, table)
         self.send_signal(self.widget.Inputs.data, table)
         self.widget.setup_plot.assert_called_once()
+
+    def test_unconditional_commit_on_new_signal(self):
+        with patch.object(self.widget.commit, 'now') as commit:
+            self.widget.auto_commit = False
+            commit.reset_mock()
+            self.send_signal(self.widget.Inputs.data, self.data)
+            commit.assert_called()
+
+    def test_model_update(self):
+        widget = self.widget
+
+        data = Table("iris")
+        domain = data.domain
+
+        self.send_signal(widget.Inputs.data, data)
+        self.assertIs(widget.controls.attr_color.model()[4], domain[0])
+
+        copy0 = domain[0].copy()
+        assert copy0.palette.name != "diverging_tritanopic_cwr_75_98_c20"
+        copy0.palette = ContinuousPalettes["diverging_tritanopic_cwr_75_98_c20"]
+        domain = Domain((copy0, ) + domain.attributes[1:], domain.class_var)
+        data0 = data.transform(domain)
+        self.send_signal(widget.Inputs.data, data0)
+        self.assertIs(widget.controls.attr_color.model()[4], copy0)
 
 
 if __name__ == "__main__":

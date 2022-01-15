@@ -1,26 +1,23 @@
+# pylint: disable=protected-access,unused-import
 from contextlib import contextmanager
 import os
 import pickle
-import time
-import unittest
-from unittest.mock import Mock
-# pylint: disable=unused-import
-from typing import List, Optional, TypeVar
-try:
-    from typing import Type  # typing.Type was added in 3.5.2
-except ImportError:  # pragma: no cover
-    pass
+from unittest.mock import Mock, patch
 
 import numpy as np
 import scipy.sparse as sp
-import sip
 
-from AnyQt.QtCore import Qt, QRectF, QPointF
-from AnyQt.QtTest import QTest, QSignalSpy
+from AnyQt.QtGui import QFont, QTextDocumentFragment
+from AnyQt.QtCore import QRectF, QPointF
+from AnyQt.QtTest import QSignalSpy
 from AnyQt.QtWidgets import (
-    QApplication, QComboBox, QSpinBox, QDoubleSpinBox, QSlider
+    QComboBox, QSpinBox, QDoubleSpinBox, QSlider
 )
 
+from orangewidget.widget import StateInfo
+from orangewidget.tests.base import (
+    GuiTest, WidgetTest as WidgetTestBase, DummySignalManager, DEFAULT_TIMEOUT
+)
 from Orange.base import SklModel, Model
 from Orange.classification.base_classification import (
     LearnerClassification, ModelClassification
@@ -30,324 +27,43 @@ from Orange.data import (
 )
 from Orange.modelling import Fitter
 from Orange.preprocess import RemoveNaNColumns, Randomize, Continuize
-from Orange.preprocess.preprocess import PreprocessorList, Preprocess
+from Orange.preprocess.preprocess import PreprocessorList
 from Orange.regression.base_regression import (
     LearnerRegression, ModelRegression
 )
-from Orange.widgets.report.owreport import OWReport
 from Orange.widgets.tests.utils import simulate
 from Orange.widgets.utils.annotated_data import (
     ANNOTATED_DATA_FEATURE_NAME, ANNOTATED_DATA_SIGNAL_NAME
 )
 from Orange.widgets.utils.owlearnerwidget import OWBaseLearner
+from Orange.widgets.visualize.utils.plotutils import AnchorItem
 from Orange.widgets.widget import OWWidget
 
-sip.setdestroyonexit(False)
 
-app = None
+class WidgetTest(WidgetTestBase):
+    def assert_table_equal(self, table1, table2):
+        if table1 is None or table2 is None:
+            self.assertIs(table1, table2)
+            return
+        self.assert_domain_equal(table1.domain, table2.domain)
+        np.testing.assert_array_equal(table1.X, table2.X)
+        np.testing.assert_array_equal(table1.Y, table2.Y)
+        np.testing.assert_array_equal(table1.metas, table2.metas)
 
-DEFAULT_TIMEOUT = 5000
-
-# pylint: disable=invalid-name
-T = TypeVar("T")
-
-
-class DummySignalManager:
-    def __init__(self):
-        self.outputs = {}
-
-    def send(self, widget, signal_name, value, id):
-        if not isinstance(signal_name, str):
-            signal_name = signal_name.name
-        self.outputs[(widget, signal_name)] = value
-
-
-class GuiTest(unittest.TestCase):
-    """Base class for tests that require a QApplication instance
-
-    GuiTest ensures that a QApplication exists before tests are run an
-    """
-    @classmethod
-    def setUpClass(cls):
-        """Prepare for test execution.
-
-        Ensure that a (single copy of) QApplication has been created
+    def assert_domain_equal(self, domain1, domain2):
         """
-        global app
-        if app is None:
-            app = QApplication([])
+        Test domains for equality.
 
-
-class WidgetTest(GuiTest):
-    """Base class for widget tests
-
-    Contains helper methods widget creation and working with signals.
-
-    All widgets should be created by the create_widget method, as this
-    will ensure they are created correctly.
-    """
-
-    widgets = []  # type: List[OWWidget]
-
-    @classmethod
-    def setUpClass(cls):
-        """Prepare environment for test execution
-
-        Construct a dummy signal manager and monkey patch
-        OWReport.get_instance to return a manually created instance.
+        Unlike in domain1 == domain2 uses `Variable.__eq__`, which in case of
+        DiscreteVariable ignores `values`, this method also checks that both
+        domain have equal `values`.
         """
-        super().setUpClass()
-
-        cls.widgets = []
-
-        cls.signal_manager = DummySignalManager()
-
-        report = OWReport()
-        cls.widgets.append(report)
-        OWReport.get_instance = lambda: report
-        Variable._clear_all_caches()
-
-    def tearDown(self):
-        """Process any pending events before the next test is executed."""
-        self.process_events()
-
-    def create_widget(self, cls, stored_settings=None, reset_default_settings=True):
-        # type: (Type[T], Optional[dict], bool) -> T
-        """Create a widget instance using mock signal_manager.
-
-        When used with default parameters, it also overrides settings stored
-        on disk with default defined in class.
-
-        After widget is created, QApplication.process_events is called to
-        allow any singleShot timers defined in __init__ to execute.
-
-        Parameters
-        ----------
-        cls : WidgetMetaClass
-            Widget class to instantiate
-        stored_settings : dict
-            Default values for settings
-        reset_default_settings : bool
-            If set, widget will start with default values for settings,
-            if not, values accumulated through the session will be used
-
-        Returns
-        -------
-        Widget instance : cls
-        """
-        if reset_default_settings:
-            self.reset_default_settings(cls)
-        widget = cls.__new__(cls, signal_manager=self.signal_manager,
-                             stored_settings=stored_settings)
-        widget.__init__()
-        self.process_events()
-        self.widgets.append(widget)
-        return widget
-
-    @staticmethod
-    def reset_default_settings(widget):
-        """Reset default setting values for widget
-
-        Discards settings read from disk and changes stored by fast_save
-
-        Parameters
-        ----------
-        widget : OWWidget
-            widget to reset settings for
-        """
-        settings_handler = getattr(widget, "settingsHandler", None)
-        if settings_handler:
-            # Rebind settings handler to get fresh copies of settings
-            # in known_settings
-            settings_handler.bind(widget)
-            # Reset defaults read from disk
-            settings_handler.defaults = {}
-            # Reset context settings
-            settings_handler.global_contexts = []
-
-    def process_events(self, until: callable = None, timeout=DEFAULT_TIMEOUT):
-        """Process Qt events, optionally until `until` returns
-        something True-ish.
-
-        Needs to be called manually as QApplication.exec is never called.
-
-        Parameters
-        ----------
-        until: callable or None
-            If callable, the events are processed until the function returns
-            something True-ish.
-        timeout: int
-            If until condition is not satisfied within timeout milliseconds,
-            a TimeoutError is raised.
-
-        Returns
-        -------
-        If until is not None, the True-ish result of its call.
-        """
-        if until is None:
-            until = lambda: True
-
-        started = time.perf_counter()
-        while True:
-            app.processEvents()
-            try:
-                result = until()
-                if result:
-                    return result
-            except Exception:  # until can fail with anything; pylint: disable=broad-except
-                pass
-            if (time.perf_counter() - started) * 1000 > timeout:
-                raise TimeoutError()
-            time.sleep(.05)
-
-    def show(self, widget=None):
-        """Show widget in interactive mode.
-
-        Useful for debugging tests, as widget can be inspected manually.
-        """
-        widget = widget or self.widget
-        widget.show()
-        app.exec()
-
-    def send_signal(self, input, value, *args, widget=None, wait=-1):
-        """ Send signal to widget by calling appropriate triggers.
-
-        Parameters
-        ----------
-        input : str
-        value : Object
-        id : int
-            channel id, used for inputs with flag Multiple
-        widget : Optional[OWWidget]
-            widget to send signal to. If not set, self.widget is used
-        wait : int
-            The amount of time to wait for the widget to complete.
-        """
-        return self.send_signals([(input, value)], *args,
-                                 widget=widget, wait=wait)
-
-    def send_signals(self, signals, *args, widget=None, wait=-1):
-        """ Send signals to widget by calling appropriate triggers.
-        After all the signals are send, widget's handleNewSignals() in invoked.
-
-        Parameters
-        ----------
-        signals : list of (str, Object)
-        widget : Optional[OWWidget]
-            widget to send signals to. If not set, self.widget is used
-        wait : int
-            The amount of time to wait for the widget to complete.
-        """
-        if widget is None:
-            widget = self.widget
-        for input, value in signals:
-            self._send_signal(widget, input, value, *args)
-        widget.handleNewSignals()
-        if wait >= 0 and widget.isBlocking():
-            spy = QSignalSpy(widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout=wait))
-
-    @staticmethod
-    def _send_signal(widget, input, value, *args):
-        if isinstance(input, str):
-            for input_signal in widget.get_signals("inputs"):
-                if input_signal.name == input:
-                    input = input_signal
-                    break
-            else:
-                raise ValueError("'{}' is not an input name for widget {}"
-                                 .format(input, type(widget).__name__))
-        if widget.isBlocking():
-            raise RuntimeError("'send_signal' called but the widget is in "
-                               "blocking state and does not accept inputs.")
-        handler = getattr(widget, input.handler)
-
-        # Assert sent input is of correct class
-        assert isinstance(value, (input.type, type(None))), \
-            '{} should be {}'.format(value.__class__.__mro__, input.type)
-
-        handler(value, *args)
-
-    def wait_until_stop_blocking(self, widget=None, wait=DEFAULT_TIMEOUT):
-        """Wait until the widget stops blocking i.e. finishes computation.
-
-        Parameters
-        ----------
-        widget : Optional[OWWidget]
-            widget to send signal to. If not set, self.widget is used
-        wait : int
-            The amount of time to wait for the widget to complete.
-
-        """
-        if widget is None:
-            widget = self.widget
-
-        if widget.isBlocking():
-            spy = QSignalSpy(widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout=wait))
-
-    def commit_and_wait(self, widget=None, wait=DEFAULT_TIMEOUT):
-        """Unconditinal commit and wait to stop blocking if needed.
-
-        Parameters
-        ----------
-        widget : Optional[OWWidget]
-            widget to send signal to. If not set, self.widget is used
-        wait : int
-            The amount of time to wait for the widget to complete.
-
-        """
-        if widget is None:
-            widget = self.widget
-
-        widget.unconditional_commit()
-        self.wait_until_stop_blocking(widget=widget, wait=wait)
-
-    def get_output(self, output, widget=None, wait=DEFAULT_TIMEOUT):
-        """Return the last output that has been sent from the widget.
-
-        Parameters
-        ----------
-        output_name : str
-        widget : Optional[OWWidget]
-            widget whose output is returned. If not set, self.widget is used
-        wait : int
-            The amount of time (in milliseconds) to wait for widget to complete.
-
-        Returns
-        -------
-        The last sent value of given output or None if nothing has been sent.
-        """
-        if widget is None:
-            widget = self.widget
-
-        if widget.isBlocking() and wait >= 0:
-            spy = QSignalSpy(widget.blockingStateChanged)
-            self.assertTrue(spy.wait(wait),
-                            "Failed to get output in the specified timeout")
-        if not isinstance(output, str):
-            output = output.name
-        # widget.outputs are old-style signals; if empty, use new style
-        outputs = widget.outputs or widget.Outputs.__dict__.values()
-        assert output in (out.name for out in outputs), \
-            "widget {} has no output {}".format(widget.name, output)
-        return self.signal_manager.outputs.get((widget, output), None)
-
-    @contextmanager
-    def modifiers(self, modifiers):
-        """
-        Context that simulates pressed modifiers
-
-        Since QTest.keypress requries pressing some key, we simulate
-        pressing "BassBoost" that looks exotic enough to not meddle with
-        anything.
-        """
-        old_modifiers = QApplication.keyboardModifiers()
-        try:
-            QTest.keyPress(self.widget, Qt.Key_BassBoost, modifiers)
-            yield
-        finally:
-            QTest.keyRelease(self.widget, Qt.Key_BassBoost, old_modifiers)
+        for var1, var2 in zip(domain1.variables + domain1.metas,
+                              domain2.variables + domain2.metas):
+            self.assertEqual(type(var1), type(var2))
+            self.assertEqual(var1.name, var2.name)
+            if var1.is_discrete:
+                self.assertEqual(var1.values, var2.values)
 
 
 class TestWidgetTest(WidgetTest):
@@ -357,6 +73,8 @@ class TestWidgetTest(WidgetTest):
         with self.assertRaises(TimeoutError):
             self.process_events(until=lambda: False, timeout=0)
 
+    def test_minimum_size(self):
+        return  # skip this test
 
 
 class BaseParameterMapping:
@@ -468,7 +186,7 @@ class ParameterMapping(BaseParameterMapping):
     @staticmethod
     def _default_get_value(gui_element, values):
         if isinstance(gui_element, (QSpinBox, QDoubleSpinBox, QSlider)):
-            return lambda: gui_element.value()
+            return gui_element.value
         elif isinstance(gui_element, QComboBox):
             return lambda: values[gui_element.currentIndex()]
         else:
@@ -629,7 +347,8 @@ class WidgetLearnerTestMixin:
         new_name = "Learner Name"
         self.widget.apply_button.button.click()
         self.assertEqual(self.widget.learner.name,
-                         self.widget.name_line_edit.text())
+                         self.widget.name_line_edit.text()
+                         or self.widget.name_line_edit.placeholderText())
         self.widget.name_line_edit.setText(new_name)
         self.widget.apply_button.button.click()
         self.wait_until_stop_blocking()
@@ -650,9 +369,11 @@ class WidgetLearnerTestMixin:
         self.widget.apply_button.button.click()
         self.wait_until_stop_blocking()
         model = self.get_output(self.widget.Outputs.model)
+        self.assertIsNotNone(model)
         pickle.dumps(model)
 
-    def _get_param_value(self, learner, param):
+    @staticmethod
+    def _get_param_value(learner, param):
         if isinstance(learner, Fitter):
             # Both is just a was to indicate to the tests, fitters don't
             # actually support this
@@ -741,7 +462,9 @@ class WidgetLearnerTestMixin:
                 new_value = [x for x in parameter.values
                              if x != parameter.get_value()][0]
                 parameter.set_value(new_value)
-                self.widget.apply.assert_called_once_with()
+                # wait for asynchronous calls
+                self.process_events(lambda: self.widget.apply.call_args is not None)
+                self.widget.apply.assert_called_once()
 
     @staticmethod
     def _should_check_parameter(parameter, data):
@@ -751,6 +474,14 @@ class WidgetLearnerTestMixin:
                 (parameter.problem_type == "regression" and
                  data.domain.has_continuous_class) or
                 (parameter.problem_type == "both"))
+
+    def test_send_report(self, timeout=DEFAULT_TIMEOUT):
+        """Test report"""
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.widget.report_button.click()
+        self.wait_until_finished(timeout=timeout)
+        self.send_signal(self.widget.Inputs.data, None)
+        self.widget.report_button.click()
 
 
 class WidgetOutputsTestMixin:
@@ -770,20 +501,23 @@ class WidgetOutputsTestMixin:
     _compare_selected_annotated_domains.
     """
 
-    def init(self):
-        Variable._clear_all_caches()
+    def init(self, same_table_attributes=True, output_all_on_no_selection=False):
         self.data = Table("iris")
         self.same_input_output_domain = True
+        self.same_table_attributes = same_table_attributes
+        self.output_all_on_no_selection = output_all_on_no_selection
 
     def test_outputs(self, timeout=DEFAULT_TIMEOUT):
         self.send_signal(self.signal_name, self.signal_data)
 
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.wait_until_finished(timeout=timeout)
 
         # check selected data output
-        self.assertIsNone(self.get_output("Selected Data"))
+        output = self.get_output("Selected Data")
+        if self.output_all_on_no_selection:
+            self.assertEqual(output, self.signal_data)
+        else:
+            self.assertIsNone(output)
 
         # check annotated data output
         feature_name = ANNOTATED_DATA_FEATURE_NAME
@@ -801,12 +535,14 @@ class WidgetOutputsTestMixin:
                          self.same_input_output_domain)
         np.testing.assert_array_equal(selected.X[:, :n_attr],
                                       self.data.X[selected_indices])
-        self.assertEqual(selected.attributes, self.data.attributes)
+        if self.same_table_attributes:
+            self.assertEqual(selected.attributes, self.data.attributes)
 
         # check annotated data output
         annotated = self.get_output(ANNOTATED_DATA_SIGNAL_NAME)
         self.assertEqual(n_sel, np.sum([i[feature_name] for i in annotated]))
-        self.assertEqual(annotated.attributes, self.data.attributes)
+        if self.same_table_attributes:
+            self.assertEqual(annotated.attributes, self.data.attributes)
 
         # compare selected and annotated data domains
         self._compare_selected_annotated_domains(selected, annotated)
@@ -829,7 +565,6 @@ class ProjectionWidgetTestMixin:
     """Class for projection widget testing"""
 
     def init(self):
-        Variable._clear_all_caches()
         self.data = Table("iris")
 
     def _select_data(self):
@@ -842,10 +577,16 @@ class ProjectionWidgetTestMixin:
         annotated_vars = annotated.domain.variables
         self.assertLessEqual(set(selected_vars), set(annotated_vars))
 
-    def test_setup_graph(self):
+    def test_setup_graph(self, timeout=DEFAULT_TIMEOUT):
         """Plot should exist after data has been sent in order to be
         properly set/updated"""
         self.send_signal(self.widget.Inputs.data, self.data)
+
+        self.assertTrue(
+            self.signal_manager.wait_for_finished(self.widget, timeout),
+            f"Did not finish in the specified {timeout}ms timeout"
+        )
+
         self.assertIsNotNone(self.widget.graph.scatterplot_item)
 
     def test_default_attrs(self, timeout=DEFAULT_TIMEOUT):
@@ -855,9 +596,7 @@ class ProjectionWidgetTestMixin:
         self.assertIsNone(self.widget.attr_label)
         self.assertIsNone(self.widget.attr_shape)
         self.assertIsNone(self.widget.attr_size)
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.wait_until_finished(timeout=timeout)
         self.send_signal(self.widget.Inputs.data, None)
         self.assertIsNone(self.widget.attr_color)
 
@@ -888,9 +627,7 @@ class ProjectionWidgetTestMixin:
         cont = Continuize(multinomial_treatment=Continuize.AsOrdinal)
         data = cont(Table("zoo"))
         self.send_signal(self.widget.Inputs.data, data)
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.wait_until_finished(timeout=timeout)
         simulate.combobox_activate_item(self.widget.controls.attr_label,
                                         data.domain[-1].name)
 
@@ -906,9 +643,7 @@ class ProjectionWidgetTestMixin:
         """Test widget for datasets with missing values and constant features"""
         for ds in datasets.datasets():
             self.send_signal(self.widget.Inputs.data, ds)
-            if self.widget.isBlocking():
-                spy = QSignalSpy(self.widget.blockingStateChanged)
-                self.assertTrue(spy.wait(timeout))
+            self.wait_until_finished(timeout=timeout)
 
     def test_none_data(self):
         """Test widget for empty dataset"""
@@ -918,73 +653,92 @@ class ProjectionWidgetTestMixin:
         """Test if data is plotted only once but committed on every input change"""
         table = Table("heart_disease")
         self.widget.setup_plot = Mock()
-        self.widget.commit = Mock()
+        self.widget.commit.now = self.widget.commit.deferred = Mock()
         self.send_signal(self.widget.Inputs.data, table)
         self.widget.setup_plot.assert_called_once()
-        self.widget.commit.assert_called_once()
+        self.widget.commit.now.assert_called_once()
 
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.wait_until_finished(timeout=timeout)
+        self.widget.setup_plot.assert_called_once()
+        self.widget.commit.now.assert_called_once()
 
-        self.widget.commit.reset_mock()
+        self.widget.commit.now.reset_mock()
         self.send_signal(self.widget.Inputs.data_subset, table[::10])
         self.widget.setup_plot.assert_called_once()
-        self.widget.commit.assert_called_once()
+        self.widget.commit.now.assert_called_once()
+
+    def test_subset_data_color(self, timeout=DEFAULT_TIMEOUT):
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.assertTrue(
+            self.signal_manager.wait_for_finished(self.widget, timeout),
+            f"Did not finish in the specified {timeout}ms timeout"
+        )
+        self.send_signal(self.widget.Inputs.data_subset, self.data[:10])
+        subset = [brush.color().name() == "#46befa" for brush in
+                  self.widget.graph.scatterplot_item.data['brush'][:10]]
+        other = [brush.color().name() == "#000000" for brush in
+                 self.widget.graph.scatterplot_item.data['brush'][10:]]
+        self.assertTrue(all(subset))
+        self.assertTrue(all(other))
 
     def test_class_density(self, timeout=DEFAULT_TIMEOUT):
         """Check class density update"""
         self.send_signal(self.widget.Inputs.data, self.data)
         self.widget.cb_class_density.click()
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.wait_until_finished(timeout=timeout)
         self.send_signal(self.widget.Inputs.data, None)
         self.widget.cb_class_density.click()
 
     def test_dragging_tooltip(self):
         """Dragging tooltip depends on data being jittered"""
-        text = self.widget.graph.tiptexts[0]
+        text = QTextDocumentFragment.fromHtml(self.widget.graph.tiptexts[0]).toPlainText()
         self.send_signal(self.widget.Inputs.data, Table("heart_disease"))
         self.assertEqual(self.widget.graph.tip_textitem.toPlainText(), text)
-        self.widget.graph.controls.jitter_size.setValue(1)
-        self.assertGreater(self.widget.graph.tip_textitem.toPlainText(), text)
 
     def test_sparse_data(self, timeout=DEFAULT_TIMEOUT):
         """Test widget for sparse data"""
         table = Table("iris").to_sparse()
         self.assertTrue(sp.issparse(table.X))
         self.send_signal(self.widget.Inputs.data, table)
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.wait_until_finished(timeout=timeout)
         self.send_signal(self.widget.Inputs.data_subset, table[::30])
-        self.assertEqual(len(self.widget.subset_indices), 5)
+        self.assertEqual(len(self.widget.subset_data), 5)
 
     def test_invalidated_embedding(self, timeout=DEFAULT_TIMEOUT):
         """Check if graph has been replotted when sending same data"""
         self.widget.graph.update_coordinates = Mock()
         self.widget.graph.update_point_props = Mock()
         self.send_signal(self.widget.Inputs.data, self.data)
-        self.widget.graph.update_coordinates.assert_called_once()
-        self.widget.graph.update_point_props.assert_called_once()
+        self.wait_until_finished(timeout=timeout)
 
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.widget.graph.update_coordinates.assert_called()
+        self.widget.graph.update_point_props.assert_called()
 
         self.widget.graph.update_coordinates.reset_mock()
         self.widget.graph.update_point_props.reset_mock()
         self.send_signal(self.widget.Inputs.data, self.data)
+        self.wait_until_finished(timeout=timeout)
+
         self.widget.graph.update_coordinates.assert_not_called()
         self.widget.graph.update_point_props.assert_called_once()
 
-    def test_saved_selection(self):
+    def test_saved_selection(self, timeout=DEFAULT_TIMEOUT):
         self.send_signal(self.widget.Inputs.data, self.data)
+        self.assertTrue(
+            self.signal_manager.wait_for_finished(self.widget, timeout),
+            f"Did not finish in the specified {timeout}ms timeout"
+        )
+
         self.widget.graph.select_by_indices(list(range(0, len(self.data), 10)))
         settings = self.widget.settingsHandler.pack_data(self.widget)
         w = self.create_widget(self.widget.__class__, stored_settings=settings)
+
         self.send_signal(self.widget.Inputs.data, self.data, widget=w)
+        self.assertTrue(
+            self.signal_manager.wait_for_finished(w, timeout),
+            f"Did not finish in the specified {timeout}ms timeout"
+        )
+
         self.assertEqual(np.sum(w.graph.selection), 15)
         np.testing.assert_equal(self.widget.graph.selection, w.graph.selection)
 
@@ -992,37 +746,117 @@ class ProjectionWidgetTestMixin:
         """Test report """
         self.send_signal(self.widget.Inputs.data, self.data)
         self.widget.report_button.click()
-        if self.widget.isBlocking():
-            spy = QSignalSpy(self.widget.blockingStateChanged)
-            self.assertTrue(spy.wait(timeout))
+        self.wait_until_finished(timeout=timeout)
         self.send_signal(self.widget.Inputs.data, None)
         self.widget.report_button.click()
+
+    def test_hidden_effective_variables(self, timeout=DEFAULT_TIMEOUT):
+        hidden_var1 = ContinuousVariable("c1")
+        hidden_var1.attributes["hidden"] = True
+        hidden_var2 = ContinuousVariable("c2")
+        hidden_var2.attributes["hidden"] = True
+        class_vars = [DiscreteVariable("cls", values=("a", "b"))]
+        table = Table(Domain([hidden_var1, hidden_var2], class_vars),
+                      np.array([[0., 1.], [2., 3.]]),
+                      np.array([[0.], [1.]]))
+        self.send_signal(self.widget.Inputs.data, table)
+        self.wait_until_finished(timeout=timeout)
+        self.send_signal(self.widget.Inputs.data, table)
+
+    def test_visual_settings(self, timeout=DEFAULT_TIMEOUT):
+        graph = self.widget.graph
+        font = QFont()
+        font.setItalic(True)
+        font.setFamily("Helvetica")
+
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.wait_until_finished(timeout=timeout)
+
+        key, value = ("Fonts", "Font family", "Font family"), "Helvetica"
+        self.widget.set_visual_settings(key, value)
+
+        key, value = ("Fonts", "Title", "Font size"), 20
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Title", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(20)
+        self.assertFontEqual(graph.parameter_setter.title_item.item.font(), font)
+
+        key, value = ("Fonts", "Label", "Font size"), 10
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Label", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        simulate.combobox_activate_item(self.widget.controls.attr_label,
+                                        self.data.domain[0].name)
+        font.setPointSize(10)
+        self.assertFontEqual(graph.labels[0].textItem.font(), font)
+
+        key, value = ("Fonts", "Categorical legend", "Font size"), 14
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Categorical legend", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(14)
+        legend_item = list(graph.parameter_setter.cat_legend_items)[0]
+        self.assertFontEqual(legend_item[1].item.font(), font)
+
+        key, value = ("Fonts", "Numerical legend", "Font size"), 12
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Numerical legend", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        simulate.combobox_activate_item(self.widget.controls.attr_color,
+                                        self.data.domain[0].name)
+        variables = self.data.domain.variables + self.data.domain.metas
+        discrete_var = next(
+            (x for x in variables if isinstance(x, DiscreteVariable)), None
+        )
+        if discrete_var:
+            # activate item only when discrete variable available
+            simulate.combobox_activate_item(
+                self.widget.controls.attr_shape, discrete_var.name
+            )
+        font.setPointSize(12)
+        self.assertFontEqual(graph.parameter_setter.num_legend.items[0][0].font, font)
+
+        key, value = ("Annotations", "Title", "Title"), "Foo"
+        self.widget.set_visual_settings(key, value)
+        self.assertEqual(graph.parameter_setter.title_item.item.toPlainText(), "Foo")
+        self.assertEqual(graph.parameter_setter.title_item.text, "Foo")
+
+    def assertFontEqual(self, font1, font2):
+        self.assertEqual(font1.family(), font2.family())
+        self.assertEqual(font1.pointSize(), font2.pointSize())
+        self.assertEqual(font1.italic(), font2.italic())
 
 
 class AnchorProjectionWidgetTestMixin(ProjectionWidgetTestMixin):
     def test_embedding_missing_values(self):
         table = Table("heart_disease")
-        table.X[0] = np.nan
+        with table.unlocked():
+            table.X[0] = np.nan
         self.send_signal(self.widget.Inputs.data, table)
         self.assertFalse(np.all(self.widget.valid_data))
         output = self.get_output(ANNOTATED_DATA_SIGNAL_NAME)
         embedding_mask = np.all(np.isnan(output.metas[:, :2]), axis=1)
         np.testing.assert_array_equal(~embedding_mask, self.widget.valid_data)
+        # reload
+        self.send_signal(self.widget.Inputs.data, table)
 
-    def test_sparse_data(self):
+    def test_sparse_data(self, timeout=DEFAULT_TIMEOUT):
         table = Table("iris")
-        table.X = sp.csr_matrix(table.X)
+        with table.unlocked():
+            table.X = sp.csr_matrix(table.X)
         self.assertTrue(sp.issparse(table.X))
         self.send_signal(self.widget.Inputs.data, table)
         self.assertTrue(self.widget.Error.sparse_data.is_shown())
         self.send_signal(self.widget.Inputs.data_subset, table[::30])
-        self.assertEqual(len(self.widget.subset_indices), 5)
+        self.assertEqual(len(self.widget.subset_data), 5)
         self.send_signal(self.widget.Inputs.data, None)
         self.assertFalse(self.widget.Error.sparse_data.is_shown())
 
     def test_manual_move(self):
         data = self.data.copy()
-        data[1, 0] = np.nan
+        with data.unlocked():
+            data[1, 0] = np.nan
         nvalid, nsample = len(self.data) - 1, self.widget.SAMPLE_SIZE
         self.send_signal(self.widget.Inputs.data, data)
         self.widget.graph.select_by_indices(list(range(0, len(data), 10)))
@@ -1040,17 +874,23 @@ class AnchorProjectionWidgetTestMixin(ProjectionWidgetTestMixin):
         self.assertEqual(len(self.widget.graph.scatterplot_item.data), nvalid)
         np.testing.assert_equal(self.widget.graph.selection, selection)
 
-    def test_output_preprocessor(self):
-        self.send_signal(self.widget.Inputs.data, self.data)
-        pp = self.get_output(self.widget.Outputs.preprocessor)
-        self.assertIsInstance(pp, Preprocess)
-        transformed = pp(self.data[::10])
-        self.assertIsInstance(transformed, Table)
-        self.assertEqual(transformed.X.shape, (len(self.data) / 10, 2))
-        output = self.get_output(self.widget.Outputs.annotated_data)
-        np.testing.assert_array_equal(transformed.X, output.metas[::10, :2])
-        self.assertEqual([a.name for a in transformed.domain.attributes],
-                         [m.name for m in output.domain.metas[:2]])
+    def test_visual_settings(self, timeout=DEFAULT_TIMEOUT):
+        super().test_visual_settings(timeout)
+
+        graph = self.widget.graph
+        font = QFont()
+        font.setItalic(True)
+        font.setFamily("Helvetica")
+
+        key, value = ("Fonts", "Anchor", "Font size"), 10
+        self.widget.set_visual_settings(key, value)
+        key, value = ("Fonts", "Anchor", "Italic"), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(10)
+        for item in graph.anchor_items:
+            if isinstance(item, AnchorItem):
+                item = item._label
+            self.assertFontEqual(item.textItem.font(), font)
 
 
 class datasets:
@@ -1114,18 +954,19 @@ class datasets:
         -------
         data : Orange.data.Table
         """
-        table = Table(
+        table = Table.from_list(
             Domain(
                 [ContinuousVariable("a"),
                  ContinuousVariable("b"),
-                 DiscreteVariable("c", values=["y", "n"])]
+                 DiscreteVariable("c", values=("y", "n"))]
             ),
             list(zip(
                 [42.48, 16.84, 15.23, 23.8],
                 ["", "", "", ""],
                 "ynyn"
             )))
-        table[:, 1] = value
+        with table.unlocked():
+            table[:, 1] = value
         return table
 
     @classmethod
@@ -1166,3 +1007,9 @@ class datasets:
         yield cls.data_one_column_nans()
         yield ds_cls
         yield ds_reg
+
+
+@contextmanager
+def open_widget_classes():
+    with patch.object(OWWidget, "__init_subclass__"):
+        yield

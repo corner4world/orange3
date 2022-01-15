@@ -82,6 +82,7 @@ class OWNNLearner(OWBaseLearner):
     solver_index = Setting(2)
     max_iterations = Setting(200)
     alpha_index = Setting(0)
+    replicable = Setting(True)
     settings_version = 1
 
     alphas = list(chain([x / 10000 for x in range(1, 10)],
@@ -94,9 +95,10 @@ class OWNNLearner(OWBaseLearner):
                         range(100, 1001, 50)))
 
     def add_main_layout(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
         form = QFormLayout()
         form.setFieldGrowthPolicy(form.AllNonFixedFieldsGrow)
-        form.setVerticalSpacing(25)
+        form.setLabelAlignment(Qt.AlignLeft)
         gui.widgetBox(self.controlArea, True, orientation=form)
         form.addRow(
             "Neurons in hidden layers:",
@@ -105,7 +107,7 @@ class OWNNLearner(OWBaseLearner):
                 orientation=Qt.Horizontal, callback=self.settings_changed,
                 tooltip="A list of integers defining neurons. Length of list "
                         "defines the number of layers. E.g. 4, 2, 2, 3.",
-                placeholderText="e.g. 100,"))
+                placeholderText="e.g. 10,"))
         form.addRow(
             "Activation:",
             gui.comboBox(
@@ -113,7 +115,6 @@ class OWNNLearner(OWBaseLearner):
                 label="Activation:", items=[i for i in self.act_lbl],
                 callback=self.settings_changed))
 
-        form.addRow(" ", gui.separator(None, 16))
         form.addRow(
             "Solver:",
             gui.comboBox(
@@ -132,11 +133,18 @@ class OWNNLearner(OWBaseLearner):
         form.addRow(
             "Maximal number of iterations:",
             gui.spin(
-                None, self, "max_iterations", 10, 10000, step=10,
+                None, self, "max_iterations", 10, 1000000, step=10,
                 label="Max iterations:", orientation=Qt.Horizontal,
                 alignment=Qt.AlignRight, callback=self.settings_changed))
 
+        form.addRow(
+            gui.checkBox(
+                None, self, "replicable", label="Replicable training",
+                callback=self.settings_changed, attribute=Qt.WA_LayoutUsesWidgetRect)
+        )
+
     def set_alpha(self):
+        # called from init, pylint: disable=attribute-defined-outside-init
         self.strength_C = self.alphas[self.alpha_index]
         self.reg_label.setText("Regularization, α={}:".format(self.strength_C))
 
@@ -145,13 +153,17 @@ class OWNNLearner(OWBaseLearner):
         return self.alphas[self.alpha_index]
 
     def setup_layout(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
         super().setup_layout()
 
         self._task = None  # type: Optional[Task]
         self._executor = ThreadExecutor()
 
         # just a test cancel button
-        gui.button(self.apply_button, self, "Cancel", callback=self.cancel)
+        b = gui.button(self.apply_button, self, "Cancel",
+                       callback=self.cancel, addToLayout=False)
+        self.apply_button.layout().insertStretch(0, 100)
+        self.apply_button.layout().insertWidget(0, b)
 
     def create_learner(self):
         return self.LEARNER(
@@ -159,6 +171,7 @@ class OWNNLearner(OWBaseLearner):
             activation=self.activation[self.activation_index],
             solver=self.solver[self.solver_index],
             alpha=self.alpha,
+            random_state=1 if self.replicable else None,
             max_iter=self.max_iterations,
             preprocessors=self.preprocessors)
 
@@ -167,13 +180,14 @@ class OWNNLearner(OWBaseLearner):
                 ("Activation", self.act_lbl[self.activation_index]),
                 ("Solver", self.solv_lbl[self.solver_index]),
                 ("Alpha", self.alpha),
-                ("Max iterations", self.max_iterations))
+                ("Max iterations", self.max_iterations),
+                ("Replicable training", self.replicable))
 
     def get_hidden_layers(self):
         layers = tuple(map(int, re.findall(r'\d+', self.hidden_layers_input)))
         if not layers:
-            layers = (100,)
-            self.hidden_layers_input = "100,"
+            layers = (10,)
+            self.hidden_layers_input = "10,"
         return layers
 
     def update_model(self):
@@ -202,7 +216,7 @@ class OWNNLearner(OWBaseLearner):
         lastemitted = 0.
 
         def callback(iteration):
-            nonlocal task  # type: Task
+            nonlocal task
             nonlocal lastemitted
             if task.isInterruptionRequested():
                 raise CancelTaskException()
@@ -228,7 +242,9 @@ class OWNNLearner(OWBaseLearner):
         task.done.connect(self._task_finished)
         task.progressChanged.connect(self.setProgressValue)
 
+        # set in setup_layout; pylint: disable=attribute-defined-outside-init
         self._task = task
+
         self.progressBarInit()
         self.setBlocking(True)
 
@@ -245,7 +261,7 @@ class OWNNLearner(OWBaseLearner):
         assert self._task.future is f
         assert f.done()
         self._task.deleteLater()
-        self._task = None
+        self._task = None  # pylint: disable=attribute-defined-outside-init
         self.setBlocking(False)
         self.progressBarFinished()
 
@@ -274,7 +290,7 @@ class OWNNLearner(OWBaseLearner):
             self._task.done.disconnect(self._task_finished)
             self._task.progressChanged.disconnect(self.setProgressValue)
             self._task.deleteLater()
-            self._task = None
+            self._task = None  # pylint: disable=attribute-defined-outside-init
 
         self.progressBarFinished()
         self.setBlocking(False)

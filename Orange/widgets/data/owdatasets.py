@@ -14,7 +14,7 @@ from AnyQt.QtWidgets import (
     QLabel, QLineEdit, QTextBrowser, QSplitter, QTreeView,
     QStyleOptionViewItem, QStyledItemDelegate, QStyle, QApplication
 )
-from AnyQt.QtGui import QStandardItemModel, QStandardItem
+from AnyQt.QtGui import QStandardItemModel, QStandardItem, QBrush, QColor
 from AnyQt.QtCore import (
     Qt, QSize, QObject, QThread, QModelIndex, QSortFilterProxyModel,
     QItemSelectionModel,
@@ -25,10 +25,10 @@ from serverfiles import LocalFiles, ServerFiles, sizeformat
 
 import Orange.data
 from Orange.misc.environ import data_dir
-from Orange.widgets import widget, settings, gui
+from Orange.widgets import settings, gui
 from Orange.widgets.utils.signals import Output
 from Orange.widgets.utils.widgetpreview import WidgetPreview
-from Orange.widgets.widget import Msg
+from Orange.widgets.widget import OWWidget, Msg
 
 
 log = logging.getLogger(__name__)
@@ -43,10 +43,13 @@ def ensure_local(index_url, file_path, local_cache_path,
     return localfiles.localpath_download(*file_path, callback=progress_advance)
 
 
-def format_info(n_all, n_cached):
-    plural = lambda x: '' if x == 1 else 's'
-    return "{} dataset{}\n{} dataset{} cached".format(
-        n_all, plural(n_all), n_cached if n_cached else 'No', plural(n_cached))
+def list_remote(server: str) -> Dict[Tuple[str, ...], dict]:
+    client = ServerFiles(server)
+    return client.allinfo()
+
+
+def list_local(path: str) -> Dict[Tuple[str, ...], dict]:
+    return LocalFiles(path).allinfo()
 
 
 def format_exception(error):
@@ -124,13 +127,25 @@ class Namespace(SimpleNamespace):
             self.title = self.filename
 
 
-class OWDataSets(widget.OWWidget):
+class TreeViewWithReturn(QTreeView):
+    returnPressed = Signal()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Return:
+            self.returnPressed.emit()
+        else:
+            super().keyPressEvent(e)
+
+
+class OWDataSets(OWWidget):
     name = "Datasets"
     description = "Load a dataset from an online repository"
     icon = "icons/DataSets.svg"
     priority = 20
     replaces = ["orangecontrib.prototypes.widgets.owdatasets.OWDataSets"]
-    keywords = ["online"]
+    keywords = ["online", "data sets"]
+
+    want_control_area = False
 
     # The following constants can be overridden in a subclass
     # to reuse this widget for a different repository
@@ -139,7 +154,8 @@ class OWDataSets(widget.OWWidget):
     DATASET_DIR = "datasets"
 
     # override HEADER_SCHEMA to define new columns
-    # if schema is changed override methods: self.assign_delegates and self.create_model
+    # if schema is changed override methods: self.assign_delegates and
+    # self.create_model
     HEADER_SCHEMA = [
         ['islocal', {'label': ''}],
         ['title', {'label': 'Title'}],
@@ -150,10 +166,12 @@ class OWDataSets(widget.OWWidget):
         ['tags', {'label': 'Tags'}]
     ]  # type: List[str, dict]
 
-    class Error(widget.OWWidget.Error):
+    IndicatorBrushes = (QBrush(Qt.darkGray), QBrush(QColor(0, 192, 0)))
+
+    class Error(OWWidget.Error):
         no_remote_datasets = Msg("Could not fetch dataset list")
 
-    class Warning(widget.OWWidget.Warning):
+    class Warning(OWWidget.Warning):
         only_local_datasets = Msg("Could not fetch datasets list, only local "
                                   "cached datasets are shown")
 
@@ -163,43 +181,48 @@ class OWDataSets(widget.OWWidget):
     #: Selected dataset id
     selected_id = settings.Setting(None)   # type: Optional[str]
 
-    auto_commit = settings.Setting(False)  # type: bool
-
     #: main area splitter state
     splitter_state = settings.Setting(b'')  # type: bytes
     header_state = settings.Setting(b'')    # type: bytes
 
     def __init__(self):
         super().__init__()
-        self.local_cache_path = os.path.join(data_dir(), self.DATASET_DIR)
+        self.allinfo_local = {}
+        self.allinfo_remote = {}
 
-        self._header_labels = [header['label'] for _, header in self.HEADER_SCHEMA]
-        self._header_index = namedtuple('_header_index', [info_tag for info_tag, _ in self.HEADER_SCHEMA])
-        self.Header = self._header_index(*[index for index, _ in enumerate(self._header_labels)])
+        self.local_cache_path = os.path.join(data_dir(), self.DATASET_DIR)
+        # current_output does not equal selected_id when, for instance, the
+        # data is still downloading
+        self.current_output = None
+
+        self._header_labels = [
+            header['label'] for _, header in self.HEADER_SCHEMA]
+        self._header_index = namedtuple(
+            '_header_index', [info_tag for info_tag, _ in self.HEADER_SCHEMA])
+        self.Header = self._header_index(
+            *[index for index, _ in enumerate(self._header_labels)])
 
         self.__awaiting_state = None  # type: Optional[_FetchState]
 
-        box = gui.widgetBox(self.controlArea, "Info")
-
-        self.infolabel = QLabel(text="Initializing...\n\n")
-        box.layout().addWidget(self.infolabel)
-
-        gui.widgetLabel(self.mainArea, "Filter")
         self.filterLineEdit = QLineEdit(
-            textChanged=self.filter
+            textChanged=self.filter, placeholderText="Search for data set ..."
         )
         self.mainArea.layout().addWidget(self.filterLineEdit)
 
         self.splitter = QSplitter(orientation=Qt.Vertical)
 
-        self.view = QTreeView(
+        self.view = TreeViewWithReturn(
             sortingEnabled=True,
             selectionMode=QTreeView.SingleSelection,
             alternatingRowColors=True,
             rootIsDecorated=False,
             editTriggers=QTreeView.NoEditTriggers,
             uniformRowHeights=True,
+            toolTip="Press Return or double-click to send"
         )
+        # the method doesn't exists yet, pylint: disable=unnecessary-lambda
+        self.view.doubleClicked.connect(self.commit)
+        self.view.returnPressed.connect(self.commit)
         box = gui.widgetBox(self.splitter, "Description", addToLayout=False)
         self.descriptionlabel = QLabel(
             wordWrap=True,
@@ -224,12 +247,10 @@ class OWDataSets(widget.OWWidget):
             setattr(self, "splitter_state", bytes(self.splitter.saveState()))
         )
         self.mainArea.layout().addWidget(self.splitter)
-        self.controlArea.layout().addStretch(10)
-        gui.auto_commit(self.controlArea, self, "auto_commit", "Send Data")
 
         proxy = QSortFilterProxyModel()
         proxy.setFilterKeyColumn(-1)
-        proxy.setFilterCaseSensitivity(False)
+        proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.view.setModel(proxy)
 
         if self.splitter_state:
@@ -241,7 +262,7 @@ class OWDataSets(widget.OWWidget):
         self.setStatusMessage("Initializing")
 
         self._executor = ThreadPoolExecutor(max_workers=1)
-        f = self._executor.submit(self.list_remote)
+        f = self._executor.submit(list_remote, self.INDEX_URL)
         w = FutureWatcher(f, parent=self)
         w.done.connect(self.__set_index)
 
@@ -253,7 +274,7 @@ class OWDataSets(widget.OWWidget):
         self.view.setItemDelegate(UniformHeightDelegate(self))
         self.view.setItemDelegateForColumn(
             self.Header.islocal,
-            UniformHeightIndicatorDelegate(self, role=Qt.DisplayRole)
+            UniformHeightIndicatorDelegate(self, role=Qt.DisplayRole, indicatorSize=4)
         )
         self.view.setItemDelegateForColumn(
             self.Header.size,
@@ -279,7 +300,8 @@ class OWDataSets(widget.OWWidget):
         isremote = file_path in self.allinfo_remote
 
         outdated = islocal and isremote and (
-                self.allinfo_remote[file_path].get('version', '') != self.allinfo_local[file_path].get('version', '')
+            self.allinfo_remote[file_path].get('version', '')
+            != self.allinfo_local[file_path].get('version', '')
         )
         islocal &= not outdated
 
@@ -290,11 +312,7 @@ class OWDataSets(widget.OWWidget):
                          islocal=islocal, outdated=outdated, **info)
 
     def create_model(self):
-        allkeys = set(self.allinfo_local)
-
-        if self.allinfo_remote is not None:
-            allkeys = allkeys | set(self.allinfo_remote)
-
+        allkeys = set(self.allinfo_local) | set(self.allinfo_remote)
         allkeys = sorted(allkeys)
 
         model = QStandardItemModel(self)
@@ -305,6 +323,7 @@ class OWDataSets(widget.OWWidget):
             datainfo = self._parse_info(file_path)
             item1 = QStandardItem()
             item1.setData(" " if datainfo.islocal else "", Qt.DisplayRole)
+            item1.setData(self.IndicatorBrushes[0], Qt.ForegroundRole)
             item1.setData(datainfo, Qt.UserRole)
             item2 = QStandardItem(datainfo.title)
             item3 = QStandardItem()
@@ -336,11 +355,11 @@ class OWDataSets(widget.OWWidget):
         assert f.done()
         self.setBlocking(False)
         self.setStatusMessage("")
-        self.allinfo_local = self.list_local()
+        self.allinfo_local = list_local(self.local_cache_path)
 
         try:
-            self.allinfo_remote = f.result()  # type: Dict[Tuple[str, ...], dict]
-        except Exception:
+            self.allinfo_remote = f.result()
+        except Exception:  # anytying can happen, pylint: disable=broad-except
             log.exception("Error while fetching updated index")
             if not self.allinfo_local:
                 self.Error.no_remote_datasets()
@@ -355,37 +374,39 @@ class OWDataSets(widget.OWWidget):
             self.__on_selection
         )
 
+        scw = self.view.setColumnWidth
+        width = self.view.fontMetrics().width
         self.view.resizeColumnToContents(0)
-        self.view.setColumnWidth(
-            1, min(self.view.sizeHintForColumn(1),
-                   self.view.fontMetrics().width("X" * 24)))
+        scw(self.Header.title, width("X" * 37))
+        scw(self.Header.size, 20 + max(width("888 bytes "), width("9999.9 MB ")))
+        scw(self.Header.instances, 20 + width("100000000"))
+        scw(self.Header.variables, 20 + width("1000000"))
 
         header = self.view.header()
         header.restoreState(self.header_state)
-
-        # Update the info text
-        self.infolabel.setText(format_info(model.rowCount(), len(self.allinfo_local)))
 
         if current_index != -1:
             selmodel = self.view.selectionModel()
             selmodel.select(
                 self.view.model().mapFromSource(model.index(current_index, 0)),
                 QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+            self.commit()
 
     def __update_cached_state(self):
         model = self.view.model().sourceModel()
-        localinfo = self.list_local()
+        localinfo = list_local(self.local_cache_path)
         assert isinstance(model, QStandardItemModel)
         allinfo = []
         for i in range(model.rowCount()):
             item = model.item(i, 0)
             info = item.data(Qt.UserRole)
-            info.islocal = info.file_path in localinfo
-            item.setData(" " if info.islocal else "", Qt.DisplayRole)
+            is_local = info.file_path in localinfo
+            is_current = (is_local and
+                          os.path.join(self.local_cache_path, *info.file_path)
+                          == self.current_output)
+            item.setData(" " * (is_local + is_current), Qt.DisplayRole)
+            item.setData(self.IndicatorBrushes[is_current], Qt.ForegroundRole)
             allinfo.append(info)
-
-        self.infolabel.setText(format_info(
-            model.rowCount(), sum(info.islocal for info in allinfo)))
 
     def selected_dataset(self):
         """
@@ -426,8 +447,6 @@ class OWDataSets(widget.OWWidget):
             self.descriptionlabel.setText("")
             self.selected_id = None
 
-        self.commit()
-
     def commit(self):
         """
         Commit a dataset to the output immediately (if available locally) or
@@ -450,7 +469,7 @@ class OWDataSets(widget.OWWidget):
                 # TODO: There are possible pending __progress_advance queued
                 self.__awaiting_state.pb.advance.disconnect(
                     self.__progress_advance)
-                self.progressBarFinished(processEvents=None)
+                self.progressBarFinished()
                 self.__awaiting_state = None
 
             if not di.islocal:
@@ -458,7 +477,7 @@ class OWDataSets(widget.OWWidget):
                 callback = lambda pr=pr: pr.advance.emit()
                 pr.advance.connect(self.__progress_advance, Qt.QueuedConnection)
 
-                self.progressBarInit(processEvents=None)
+                self.progressBarInit()
                 self.setStatusMessage("Fetching...")
                 self.setBlocking(True)
 
@@ -474,7 +493,7 @@ class OWDataSets(widget.OWWidget):
                 self.setBlocking(False)
                 self.commit_cached(di.file_path)
         else:
-            self.Outputs.data.send(None)
+            self.load_and_output(None)
 
     @Slot(object)
     def __commit_complete(self, f):
@@ -485,7 +504,7 @@ class OWDataSets(widget.OWWidget):
         assert self.__awaiting_state.future is f
 
         if self.isBlocking():
-            self.progressBarFinished(processEvents=None)
+            self.progressBarFinished()
             self.setBlocking(False)
             self.setStatusMessage("")
 
@@ -493,27 +512,21 @@ class OWDataSets(widget.OWWidget):
 
         try:
             path = f.result()
+        # anything can happen here, pylint: disable=broad-except
         except Exception as ex:
             log.exception("Error:")
             self.error(format_exception(ex))
             path = None
-
-        self.__update_cached_state()
-
-        if path is not None:
-            data = self.load_data(path)
-        else:
-            data = None
-        self.Outputs.data.send(data)
+        self.load_and_output(path)
 
     def commit_cached(self, file_path):
         path = LocalFiles(self.local_cache_path).localpath(*file_path)
-        self.Outputs.data.send(self.load_data(path))
+        self.load_and_output(path)
 
     @Slot()
     def __progress_advance(self):
         assert QThread.currentThread() is self.thread()
-        self.progressBarAdvance(1, processEvents=None)
+        self.progressBarAdvance(1)
 
     def onDeleteWidget(self):
         super().onDeleteWidget()
@@ -522,25 +535,28 @@ class OWDataSets(widget.OWWidget):
             self.__awaiting_state.pb.advance.disconnect(self.__progress_advance)
             self.__awaiting_state = None
 
-    def sizeHint(self):
-        return QSize(900, 600)
+    @staticmethod
+    def sizeHint():
+        return QSize(1100, 500)
 
     def closeEvent(self, event):
         self.splitter_state = bytes(self.splitter.saveState())
         self.header_state = bytes(self.view.header().saveState())
         super().closeEvent(event)
 
-    def load_data(self, path):
+    def load_and_output(self, path):
+        if path is None:
+            self.Outputs.data.send(None)
+        else:
+            data = self.load_data(path)
+            self.Outputs.data.send(data)
+
+        self.current_output = path
+        self.__update_cached_state()
+
+    @staticmethod
+    def load_data(path):
         return Orange.data.Table(path)
-
-    def list_remote(self):
-        # type: () -> Dict[Tuple[str, ...], dict]
-        client = ServerFiles(server=self.INDEX_URL)
-        return client.allinfo()
-
-    def list_local(self):
-        # type: () -> Dict[Tuple[str, ...], dict]
-        return LocalFiles(self.local_cache_path).allinfo()
 
 
 class FutureWatcher(QObject):
@@ -563,7 +579,7 @@ class progress(QObject):
     advance = Signal()
 
 
-class _FetchState(object):
+class _FetchState:
     def __init__(self, future, watcher, pb):
         self.future = future
         self.watcher = watcher
@@ -572,9 +588,9 @@ class _FetchState(object):
 
 def variable_icon(name):
     if name == "categorical":
-        return gui.attributeIconDict[Orange.data.DiscreteVariable()]
+        return gui.attributeIconDict[Orange.data.DiscreteVariable("x")]
     elif name == "numeric":  # ??
-        return gui.attributeIconDict[Orange.data.ContinuousVariable()]
+        return gui.attributeIconDict[Orange.data.ContinuousVariable("x")]
     else:
         return gui.attributeIconDict[-1]
 

@@ -15,7 +15,17 @@ from .svm import *
 from .tree import *
 from .simple_tree import *
 from .simple_random_forest import *
-from .elliptic_envelope import *
+from .outlier_detection import *
 from .rules import *
 from .sgd import *
 from .neural_network import *
+from .calibration import *
+try:
+    from .catgb import *
+except ModuleNotFoundError:
+    pass
+from .gb import *
+try:
+    from .xgb import *
+except Exception:
+    pass

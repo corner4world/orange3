@@ -2,6 +2,7 @@
 # pylint: disable=missing-docstring
 
 import unittest
+import warnings
 
 import numpy as np
 
@@ -10,7 +11,8 @@ from Orange import preprocess
 from Orange.modelling import RandomForestLearner
 from Orange.preprocess.score import InfoGain, GainRatio, Gini, Chi2, ANOVA,\
     UnivariateLinearRegression, ReliefF, FCBF, RReliefF
-
+from Orange.projection import PCA
+from Orange.tests import test_filename
 
 
 class FeatureScoringTest(unittest.TestCase):
@@ -19,8 +21,9 @@ class FeatureScoringTest(unittest.TestCase):
     def setUpClass(cls):
         cls.zoo = Table("zoo")  # disc. features, disc. class
         cls.housing = Table("housing")  # cont. features, cont. class
-        cls.monk = Table("monks-1")
-        cls.adult = Table("adult_sample")
+        cls.breast = Table(test_filename(
+            "datasets/breast-cancer-wisconsin.tab"))
+        cls.lenses = Table(test_filename("datasets/lenses.tab"))
 
     def test_info_gain(self):
         scorer = InfoGain()
@@ -41,8 +44,8 @@ class FeatureScoringTest(unittest.TestCase):
                                        correct, decimal=5)
 
     def test_classless(self):
-        classless = Table(Domain(self.zoo.domain.attributes),
-                          self.zoo[:, 0:-1])
+        classless = Table.from_table(Domain(self.zoo.domain.attributes),
+                                     self.zoo[:, 0:-1])
         scorers = [Gini(), InfoGain(), GainRatio()]
         for scorer in scorers:
             with self.assertRaises(ValueError):
@@ -91,32 +94,33 @@ class FeatureScoringTest(unittest.TestCase):
         nrows, ncols = 500, 5
         X = np.random.rand(nrows, ncols)
         y = (-3*X[:, 1] + X[:, 3]) / 2
-        data = Table(X, y)
+        data = Table.from_numpy(None, X, y)
         scorer = UnivariateLinearRegression()
         sc = [scorer(data, a) for a in range(ncols)]
         self.assertTrue(np.argmax(sc) == 1)
 
     def test_relieff(self):
-        old_monk = self.monk.copy()
-        weights = ReliefF(random_state=42)(self.monk, None)
-        found = [self.monk.domain[attr].name for attr in reversed(weights.argsort()[-3:])]
-        reference = ['a', 'b', 'e']
+        old_breast = self.breast.copy()
+        weights = ReliefF(random_state=42)(self.breast, None)
+        found = [self.breast.domain[attr].name for attr in reversed(weights.argsort()[-3:])]
+        reference = ['Bare_Nuclei', 'Clump thickness', 'Marginal_Adhesion']
         self.assertEqual(sorted(found), reference)
         # Original data is unchanged
-        np.testing.assert_equal(old_monk.X, self.monk.X)
-        np.testing.assert_equal(old_monk.Y, self.monk.Y)
+        np.testing.assert_equal(old_breast.X, self.breast.X)
+        np.testing.assert_equal(old_breast.Y, self.breast.Y)
         # Ensure it doesn't crash on adult dataset
-        weights = ReliefF(random_state=42)(self.adult, None)
-        found = [self.adult.domain[attr].name for attr in weights.argsort()[-2:]]
+        weights = ReliefF(random_state=42)(self.lenses, None)
+        found = [self.lenses.domain[attr].name for attr in weights.argsort()[-2:]]
         # some leeway for randomness in relieff random instance selection
-        self.assertIn('marital-status', found)
+        self.assertIn('tear_rate', found)
         # Ensure it doesn't crash on missing target class values
-        old_monk.Y[0] = np.nan
-        weights = ReliefF()(old_monk, None)
+        with old_breast.unlocked():
+            old_breast.Y[0] = np.nan
+        weights = ReliefF()(old_breast, None)
 
         np.testing.assert_array_equal(
-            ReliefF(random_state=1)(self.monk, None),
-            ReliefF(random_state=1)(self.monk, None)
+            ReliefF(random_state=1)(self.breast, None),
+            ReliefF(random_state=1)(self.breast, None)
         )
 
     def test_rrelieff(self):
@@ -150,12 +154,16 @@ class FeatureScoringTest(unittest.TestCase):
                             DiscreteVariable('target')),
                      np.full((2, 2), np.nan),
                      np.r_[0., 1])
-        weights = scorer(data, None)
-        np.testing.assert_equal(weights, np.nan)
+        with warnings.catch_warnings():
+            # these warnings are expected
+            warnings.filterwarnings("ignore", "invalid value.*double_scalars")
+            warnings.filterwarnings("ignore", "invalid value.*true_divide")
+
+            weights = scorer(data, None)
+            np.testing.assert_equal(weights, np.nan)
 
     def test_learner_with_transformation(self):
         learner = RandomForestLearner(random_state=0)
-        from Orange.projection import PCA
         iris = Table("iris")
         data = PCA(n_components=2)(iris)(iris)
         scores = learner.score_data(data)

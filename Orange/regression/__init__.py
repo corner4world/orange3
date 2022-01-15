@@ -1,5 +1,5 @@
 # Pull members from modules to Orange.regression namespace
-# pylint: disable=wildcard-import
+# pylint: disable=wildcard-import,broad-except
 
 from .base_regression import (ModelRegression as Model,
                               LearnerRegression as Learner,
@@ -14,3 +14,13 @@ from .random_forest import *
 from .tree import *
 from .neural_network import *
 from ..classification.simple_tree import *
+try:
+    from .catgb import *
+except ModuleNotFoundError:
+    pass
+from .gb import *
+try:
+    from .xgb import *
+except Exception:
+    pass
+from .curvefit import *

@@ -1,4 +1,4 @@
-from collections import Iterable
+from collections.abc import Iterable
 from numbers import Real
 import zlib
 
@@ -30,6 +30,26 @@ def _get_variable(dat, variable, expected_type=None, expected_name=""):
 
 
 class Distribution(np.ndarray):
+    def __array_finalize__(self, obj):
+        # defined in derived classes,
+        # pylint: disable=attribute-defined-outside-init
+        """See http://docs.scipy.org/doc/numpy/user/basics.subclassing.html"""
+        if obj is None:
+            return
+        self.variable = getattr(obj, 'variable', None)
+        self.unknowns = getattr(obj, 'unknowns', 0)
+
+    def __reduce__(self):
+        state = super().__reduce__()
+        newstate = state[2] + (self.variable, self.unknowns)
+        return state[0], state[1], newstate
+
+    def __setstate__(self, state):
+        # defined in derived classes,
+        # pylint: disable=attribute-defined-outside-init
+        super().__setstate__(state[:-2])
+        self.variable, self.unknowns = state[-2:]
+
     def __eq__(self, other):
         return (
             np.array_equal(self, other) and
@@ -130,6 +150,19 @@ class Discrete(Distribution):
         self.variable = variable
         return self
 
+    @property
+    def array_with_unknowns(self):
+        """
+        This property returns a distribution array with unknowns added
+        at the end
+
+        Returns
+        -------
+        np.array
+            Array with appended unknowns at the end of the row.
+        """
+        return np.append(np.array(self), self.unknowns)
+
     def __getitem__(self, index):
         if isinstance(index, str):
             index = self.variable.to_val(index)
@@ -204,12 +237,15 @@ class Discrete(Distribution):
         return data.Value(self.variable, value_indices)
 
     def min(self):
-        if self.variable.ordered:
-            return self.variable.values[0]
+        return None
 
     def max(self):
-        if self.variable.ordered:
-            return self.variable.values[-1]
+        return None
+
+    def sum(self, *args, **kwargs):
+        res = super().sum(*args, **kwargs)
+        res.unknowns = self.unknowns
+        return res
 
 
 class Continuous(Distribution):
@@ -286,7 +322,7 @@ class Continuous(Distribution):
 
     def variance(self):
         mean = self.mean()
-        return sum(((x - mean) ** 2) * w for x, w in zip(self[0], self[1])) / sum(self[1])
+        return np.dot((self[0] - mean) ** 2, self[1]) / np.sum(self[1])
 
     def standard_deviation(self):
         return np.sqrt(self.variance())

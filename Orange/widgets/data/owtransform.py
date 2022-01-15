@@ -1,65 +1,70 @@
+from typing import Optional
+
 from Orange.data import Table
-from Orange.preprocess.preprocess import Preprocess, Discretize
 from Orange.widgets import gui
+from Orange.widgets.report.report import describe_data
 from Orange.widgets.utils.sql import check_sql_input
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 
 
 class OWTransform(OWWidget):
-    name = "Transform"
-    description = "Transform data table."
+    name = "Apply Domain"
+    description = "Applies template domain on data table."
+    category = "Transform"
     icon = "icons/Transform.svg"
     priority = 2110
-    keywords = []
+    keywords = ["transform"]
 
     class Inputs:
         data = Input("Data", Table, default=True)
-        preprocessor = Input("Preprocessor", Preprocess)
+        template_data = Input("Template Data", Table)
 
     class Outputs:
         transformed_data = Output("Transformed Data", Table)
 
     class Error(OWWidget.Error):
-        pp_error = Msg("An error occurred while transforming data.\n{}")
+        error = Msg("An error occurred while transforming data.\n{}")
 
     resizing_enabled = False
     want_main_area = False
+    buttons_area_orientation = None
 
     def __init__(self):
         super().__init__()
-        self.data = None
-        self.preprocessor = None
-        self.transformed_data = None
+        self.data = None  # type: Optional[Table]
+        self.template_data = None  # type: Optional[Table]
+        self.transformed_info = describe_data(None)  # type: OrderedDict
 
         info_box = gui.widgetBox(self.controlArea, "Info")
         self.input_label = gui.widgetLabel(info_box, "")
-        self.preprocessor_label = gui.widgetLabel(info_box, "")
+        self.template_label = gui.widgetLabel(info_box, "")
         self.output_label = gui.widgetLabel(info_box, "")
         self.set_input_label_text()
-        self.set_preprocessor_label_text()
+        self.set_template_label_text()
 
     def set_input_label_text(self):
         text = "No data on input."
-        if self.data is not None:
+        if self.data:
             text = "Input data with {:,} instances and {:,} features.".format(
                 len(self.data),
                 len(self.data.domain.attributes))
         self.input_label.setText(text)
 
-    def set_preprocessor_label_text(self):
-        text = "No preprocessor on input."
-        if self.transformed_data is not None:
-            text = "Preprocessor {} applied.".format(self.preprocessor)
-        elif self.preprocessor is not None:
-            text = "Preprocessor {} on input.".format(self.preprocessor)
-        self.preprocessor_label.setText(text)
+    def set_template_label_text(self):
+        text = "No template data on input."
+        if self.data and self.template_data:
+            text = "Template domain applied."
+        elif self.template_data:
+            text = "Template data includes {:,} features.".format(
+                len(self.template_data.domain.attributes))
+        self.template_label.setText(text)
 
-    def set_output_label_text(self):
+    def set_output_label_text(self, data):
         text = ""
-        if self.transformed_data:
+        if data:
             text = "Output data includes {:,} features.".format(
-                len(self.transformed_data.domain.attributes))
+                len(data.domain.attributes))
         self.output_label.setText(text)
 
     @Inputs.data
@@ -68,37 +73,41 @@ class OWTransform(OWWidget):
         self.data = data
         self.set_input_label_text()
 
-    @Inputs.preprocessor
-    def set_preprocessor(self, preprocessor):
-        self.preprocessor = preprocessor
+    @Inputs.template_data
+    @check_sql_input
+    def set_template_data(self, data):
+        self.template_data = data
 
     def handleNewSignals(self):
         self.apply()
 
     def apply(self):
         self.clear_messages()
-        self.transformed_data = None
-        if self.data is not None and self.preprocessor is not None:
+        transformed_data = None
+        if self.data and self.template_data:
             try:
-                self.transformed_data = self.preprocessor(self.data)
-            except Exception as ex:   # pylint: disable=broad-except
-                self.Error.pp_error(ex)
-        self.Outputs.transformed_data.send(self.transformed_data)
+                transformed_data = self.data.transform(self.template_data.domain)
+            except Exception as ex:  # pylint: disable=broad-except
+                self.Error.error(ex)
 
-        self.set_preprocessor_label_text()
-        self.set_output_label_text()
+        data = transformed_data
+        self.transformed_info = describe_data(data)
+        self.Outputs.transformed_data.send(data)
+        self.set_template_label_text()
+        self.set_output_label_text(data)
 
     def send_report(self):
-        if self.preprocessor is not None:
-            self.report_items("Settings",
-                              (("Preprocessor", self.preprocessor),))
-        if self.data is not None:
+        if self.data:
             self.report_data("Data", self.data)
-        if self.transformed_data is not None:
-            self.report_data("Transformed data", self.transformed_data)
+        if self.template_data:
+            self.report_domain("Template data", self.template_data.domain)
+        if self.transformed_info:
+            self.report_items("Transformed data", self.transformed_info)
 
 
 if __name__ == "__main__":  # pragma: no cover
+    from Orange.preprocess import Discretize
+
+    table = Table("iris")
     WidgetPreview(OWTransform).run(
-        set_data=Table("iris"),
-        set_preprocessor=Discretize())
+        set_data=table, set_template_data=Discretize()(table))

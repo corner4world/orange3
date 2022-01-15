@@ -57,6 +57,8 @@ class OWPythagorasTree(OWWidget):
     graph_name = 'scene'
 
     # Settings
+    settingsHandler = settings.ClassValuesContextHandler()
+
     depth_limit = settings.ContextSetting(10)
     target_class_index = settings.ContextSetting(0)
     size_calc_idx = settings.Setting(0)
@@ -73,8 +75,7 @@ class OWPythagorasTree(OWWidget):
         super().__init__()
         # Instance variables
         self.model = None
-        self.instances = None
-        self.clf_dataset = None
+        self.data = None
         # The tree adapter instance which is passed from the outside
         self.tree_adapter = None
         self.legend = None
@@ -91,16 +92,19 @@ class OWPythagorasTree(OWWidget):
         # CONTROL AREA
         # Tree info area
         box_info = gui.widgetBox(self.controlArea, 'Tree Info')
-        self.info = gui.widgetLabel(box_info)
+        self.infolabel = gui.widgetLabel(box_info)
 
         # Display settings area
         box_display = gui.widgetBox(self.controlArea, 'Display Settings')
+        # maxValue is set to a wide three-digit number to probably ensure the
+        # proper label width. The maximum is later set to match the tree depth
         self.depth_slider = gui.hSlider(
             box_display, self, 'depth_limit', label='Depth', ticks=False,
-            callback=self.update_depth)
+            maxValue=900, callback=self.update_depth)
         self.target_class_combo = gui.comboBox(
             box_display, self, 'target_class_index', label='Target class',
             orientation=Qt.Horizontal, items=[], contentsLength=8,
+            searchable=True,
             callback=self.update_colors)
         self.size_calc_combo = gui.comboBox(
             box_display, self, 'size_calc_idx', label='Size',
@@ -121,10 +125,9 @@ class OWPythagorasTree(OWWidget):
             box_plot, self, 'show_legend', label='Show legend',
             callback=self.update_show_legend)
 
-        gui.button(self.controlArea, self, label="Redraw", callback=self.redraw)
-
-        # Stretch to fit the rest of the unsused area
         gui.rubber(self.controlArea)
+
+        gui.button(self.buttonsArea, self, label="Redraw", callback=self.redraw)
 
         self.controlArea.setSizePolicy(
             QSizePolicy.Preferred, QSizePolicy.Expanding)
@@ -147,18 +150,14 @@ class OWPythagorasTree(OWWidget):
     @Inputs.tree
     def set_tree(self, model=None):
         """When a different tree is given."""
+        self.closeContext()
         self.clear()
         self.model = model
 
         if model is not None:
-            self.instances = model.instances
-            # this bit is important for the regression classifier
-            if self.instances is not None and \
-                    self.instances.domain != model.domain:
-                self.clf_dataset = self.instances.transform(self.model.domain)
-            else:
-                self.clf_dataset = self.instances
+            self.data = model.instances
 
+            self._update_target_class_combo()
             self.tree_adapter = self._get_tree_adapter(self.model)
             self.ptree.clear()
 
@@ -173,34 +172,35 @@ class OWPythagorasTree(OWWidget):
             self._update_legend_colors()
             self._update_legend_visibility()
             self._update_info_box()
-            self._update_target_class_combo()
 
             self._update_main_area()
 
-            # The target class can also be passed from the meta properties
-            # This must be set after `_update_target_class_combo`
-            if hasattr(model, 'meta_target_class_index'):
-                self.target_class_index = model.meta_target_class_index
-                self.update_colors()
+            self.openContext(
+                model.domain.class_var if model.domain is not None else None
+            )
 
-            # Get meta variables describing what the settings should look like
-            # if the tree is passed from the Pythagorean forest widget.
-            if hasattr(model, 'meta_size_calc_idx'):
-                self.size_calc_idx = model.meta_size_calc_idx
-                self.update_size_calc()
+        self.update_depth()
 
-            # TODO There is still something wrong with this
-            # if hasattr(model, 'meta_depth_limit'):
-            #     self.depth_limit = model.meta_depth_limit
-            #     self.update_depth()
+        # The forest widget sets the following attributes on the tree,
+        # describing the settings on the forest widget. To keep the tree
+        # looking the same as on the forest widget, we prefer these settings to
+        # context settings, if set.
+        if hasattr(model, "meta_target_class_index"):
+            self.target_class_index = model.meta_target_class_index
+            self.update_colors()
+        if hasattr(model, "meta_size_calc_idx"):
+            self.size_calc_idx = model.meta_size_calc_idx
+            self.update_size_calc()
+        if hasattr(model, "meta_depth_limit"):
+            self.depth_limit = model.meta_depth_limit
+            self.update_depth()
 
-        self.Outputs.annotated_data.send(create_annotated_table(self.instances, None))
+        self.Outputs.annotated_data.send(create_annotated_table(self.data, None))
 
     def clear(self):
         """Clear all relevant data from the widget."""
         self.model = None
-        self.instances = None
-        self.clf_dataset = None
+        self.data = None
         self.tree_adapter = None
 
         if self.legend is not None:
@@ -228,6 +228,8 @@ class OWPythagorasTree(OWWidget):
         self.invalidate_tree()
 
     def redraw(self):
+        if self.data is None:
+            return
         self.tree_adapter.shuffle_children()
         self.invalidate_tree()
 
@@ -251,7 +253,7 @@ class OWPythagorasTree(OWWidget):
         self._update_legend_visibility()
 
     def _update_info_box(self):
-        self.info.setText('Nodes: {}\nDepth: {}'.format(
+        self.infolabel.setText('Nodes: {}\nDepth: {}'.format(
             self.tree_adapter.num_nodes,
             self.tree_adapter.max_depth
         ))
@@ -271,7 +273,7 @@ class OWPythagorasTree(OWWidget):
             self.SIZE_CALCULATION[self.size_calc_idx][0] == 'Logarithmic')
 
     def _clear_info_box(self):
-        self.info.setText('No tree on input')
+        self.infolabel.setText('No tree on input')
 
     def _clear_depth_slider(self):
         self.depth_slider.parent().setEnabled(False)
@@ -279,8 +281,7 @@ class OWPythagorasTree(OWWidget):
 
     def _clear_target_class_combo(self):
         self.target_class_combo.clear()
-        self.target_class_index = 0
-        self.target_class_combo.setCurrentIndex(self.target_class_index)
+        self.target_class_index = -1
 
     def _set_max_depth(self):
         """Set the depth to the max depth and update appropriate actors."""
@@ -307,16 +308,22 @@ class OWPythagorasTree(OWWidget):
 
     def commit(self):
         """Commit the selected data to output."""
-        if self.instances is None:
+        if self.data is None:
             self.Outputs.selected_data.send(None)
             self.Outputs.annotated_data.send(None)
             return
-        nodes = [i.tree_node.label for i in self.scene.selectedItems()
-                 if isinstance(i, SquareGraphicsItem)]
+
+        nodes = [
+            i.tree_node.label for i in self.scene.selectedItems()
+            if isinstance(i, SquareGraphicsItem)
+        ]
         data = self.tree_adapter.get_instances_in_nodes(nodes)
+
         self.Outputs.selected_data.send(data)
         selected_indices = self.tree_adapter.get_indices(nodes)
-        self.Outputs.annotated_data.send(create_annotated_table(self.instances, selected_indices))
+        self.Outputs.annotated_data.send(
+            create_annotated_table(self.data, selected_indices)
+        )
 
     def send_report(self):
         """Send report."""
@@ -327,22 +334,23 @@ class OWPythagorasTree(OWWidget):
         label = [x for x in self.target_class_combo.parent().children()
                  if isinstance(x, QLabel)][0]
 
-        if self.instances.domain.has_discrete_class:
+        if self.data.domain.has_discrete_class:
             label_text = 'Target class'
-            values = [c.title() for c in self.instances.domain.class_vars[0].values]
+            values = [c.title() for c in self.data.domain.class_vars[0].values]
             values.insert(0, 'None')
         else:
             label_text = 'Node color'
             values = list(ContinuousTreeNode.COLOR_METHODS.keys())
         label.setText(label_text)
         self.target_class_combo.addItems(values)
-        self.target_class_combo.setCurrentIndex(self.target_class_index)
+        # set it to 0, context will change if required
+        self.target_class_index = 0
 
     def _update_legend_colors(self):
         if self.legend is not None:
             self.scene.removeItem(self.legend)
 
-        if self.instances.domain.has_discrete_class:
+        if self.data.domain.has_discrete_class:
             self._classification_update_legend_colors()
         else:
             self._regression_update_legend_colors()
@@ -363,30 +371,13 @@ class OWPythagorasTree(OWWidget):
         self.scene.addItem(self.legend)
 
     def _regression_update_legend_colors(self):
-        def _get_colors_domain(domain):
-            class_var = domain.class_var
-            start, end, pass_through_black = class_var.colors
-            if pass_through_black:
-                lst_colors = [QColor(*c) for c
-                              in [start, (0, 0, 0), end]]
-            else:
-                lst_colors = [QColor(*c) for c in [start, end]]
-            return lst_colors
-
         # The colors are the class mean
+        palette = self.model.domain.class_var.palette
         if self.target_class_index == 1:
-            values = (np.min(self.clf_dataset.Y), np.max(self.clf_dataset.Y))
-            colors = _get_colors_domain(self.model.domain)
-            while len(values) != len(colors):
-                values.insert(1, -1)
-            items = list(zip(values, colors))
+            items = ((np.min(self.data.Y), np.max(self.data.Y)), palette)
         # Colors are the stddev
         elif self.target_class_index == 2:
-            values = (0, np.std(self.clf_dataset.Y))
-            colors = _get_colors_domain(self.model.domain)
-            while len(values) != len(colors):
-                values.insert(1, -1)
-            items = list(zip(values, colors))
+            items = ((0, np.std(self.data.Y)), palette)
         else:
             items = None
 
@@ -412,6 +403,7 @@ class TreeGraphicsScene(UpdateItemsOnSelectGraphicsScene):
 if __name__ == "__main__":  # pragma: no cover
     from Orange.modelling import TreeLearner
     data = Table('iris')
+    # data = Table('housing')
     model = TreeLearner(max_depth=1000)(data)
     model.instances = data
     WidgetPreview(OWPythagorasTree).run(model)

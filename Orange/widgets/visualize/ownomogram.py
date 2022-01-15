@@ -1,4 +1,8 @@
 import time
+import warnings
+from itertools import chain
+from typing import List
+from functools import singledispatch
 from enum import IntEnum
 from collections import OrderedDict
 
@@ -8,12 +12,13 @@ from AnyQt.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsSimpleTextItem,
     QGraphicsTextItem, QGraphicsLineItem, QGraphicsWidget, QGraphicsRectItem,
     QGraphicsEllipseItem, QGraphicsLinearLayout, QGridLayout, QLabel, QFrame,
-    QSizePolicy, QDesktopWidget,
+    QSizePolicy
 )
 from AnyQt.QtGui import QColor, QPainter, QFont, QPen, QBrush
-from AnyQt.QtCore import Qt, QRectF, QSize
+from AnyQt.QtCore import Qt, QRectF, QSize, QPropertyAnimation, QObject, \
+    pyqtProperty
 
-from Orange.data import Table, Domain
+from Orange.data import Table, Domain, DiscreteVariable, ContinuousVariable
 from Orange.statistics.util import nanmin, nanmax, nanmean, unique
 from Orange.classification import Model
 from Orange.classification.naive_bayes import NaiveBayesModel
@@ -22,7 +27,7 @@ from Orange.classification.logistic_regression import \
 from Orange.widgets.settings import Setting, ContextSetting, \
     ClassValuesContextHandler
 from Orange.widgets.utils.widgetpreview import WidgetPreview
-from Orange.widgets.widget import OWWidget, Msg, Input
+from Orange.widgets.widget import OWWidget, Msg, Input, Output, AttributeList
 from Orange.widgets import gui
 
 
@@ -51,13 +56,16 @@ class MovableToolTip(QLabel):
         self.adjustSize()
 
         x, y = pos.x(), (pos.y() + 15 if change_y else self.y())
-        avail = QDesktopWidget().availableGeometry(self)
+        avail = self.screen().availableGeometry()
         if x + self.width() > avail.right():
             x -= self.width()
         if y + self.height() > avail.bottom():
             y = (pos.y() - 10 - self.height() if change_y else self.y() - self.height())
         self.move(x, y)
         super().show()
+
+
+DOT_COLOR = QColor(170, 220, 255, 255)
 
 
 class DotItem(QGraphicsEllipseItem):
@@ -74,7 +82,7 @@ class DotItem(QGraphicsEllipseItem):
         self._offset = offset
         self.setPos(0, - radius / 2)
         self.setFlag(QGraphicsItem.ItemIsMovable)
-        self.setBrush(QColor(170, 220, 255, 255))
+        self.setBrush(DOT_COLOR)
         self.setPen(QPen(QBrush(QColor(20, 130, 250, 255)), 2))
         self.setZValue(100)
         self.tool_tip = MovableToolTip()
@@ -142,6 +150,7 @@ class MovableDotItem(DotItem):
         self._total_dot = None
         self._probs_dot = None
         self._vertical_line = None
+        self._mousePressFunc = None
 
     @property
     def vertical_line(self):
@@ -179,7 +188,16 @@ class MovableDotItem(DotItem):
         self._probs_dot = dot
         self._probs_dot.movable_dot_items.append(self)
 
+    def hookOnMousePress(self, func):
+        self._mousePressFunc = func
+
+    def unhookOnMousePress(self):
+        self._mousePressFunc = None
+
     def mousePressEvent(self, event):
+        if self._mousePressFunc:
+            self._mousePressFunc()
+            self._mousePressFunc = None
         self.tool_tip.show(event.screenPos(), self.get_tooltip_text(), False)
         self._x = event.pos().x()
         self.setBrush(QColor(50, 180, 250, 255))
@@ -236,6 +254,54 @@ class DiscreteMovableDotItem(MovableDotItem):
         p1 = 0 if diff < 1e-6 else (-self.value + self.tooltip_values[i]) / diff
         return [(self.tooltip_labels[i - 1].replace("<", "&lt;"), abs(p1)),
                 (self.tooltip_labels[i].replace("<", "&lt;"), abs(1 - p1))]
+
+
+class GraphicsColorAnimator(QObject):
+    @pyqtProperty(QColor)
+    def brushColor(self):
+        return self.__brushColor
+
+    @brushColor.setter
+    def brushColor(self, value):
+        self.__brushColor = value
+        for item in self.__items:
+            item.setBrush(value)
+
+    def __init__(self, parent, duration, keyValues):
+        super().__init__(parent)
+        self.__items = []
+        self.__defaultColor = defaultColor = keyValues[0][1]
+        self.__brushColor = defaultColor
+
+        self.__animation = QPropertyAnimation(self, b'brushColor', self)
+        self.__animation.setStartValue(defaultColor)
+        self.__animation.setEndValue(defaultColor)
+        self.__animation.setDuration(duration)
+        self.__animation.setKeyValues(keyValues)
+        self.__animation.setLoopCount(-1)
+
+    def setGraphicsItems(self, items):
+        if self.__animation.state() == QPropertyAnimation.Running:
+            self.__animation.stop()
+        self.__items = items
+        for item in items:
+            item.hookOnMousePress(self.stop)
+
+    def start(self):
+        self.__animation.start()
+
+    def stop(self):
+        if self.__animation.state() != QPropertyAnimation.Running:
+            return
+        self.__animation.stop()
+        for item in self.__items:
+            item.setBrush(self.__defaultColor)
+
+    def clear(self):
+        for item in self.__items:
+            item.unhookOnMousePress()
+        self.__items = []
+
 
 
 class ContinuousItemMixin:
@@ -454,9 +520,10 @@ class DiscreteFeatureItem(RulerItem):
     bold_label = False
     DOT_ITEM_CLS = DiscreteMovableDotItem
 
-    def __init__(self, name, labels, values, scale, name_offset, offset):
+    def __init__(self, name, variable, values, scale, name_offset, offset):
+        labels = _get_labels(variable)
         indices = np.argsort(values)
-        labels, values = np.array(labels)[indices], values[indices]
+        labels, values = labels[indices], values[indices]
         super().__init__(name, values, scale, name_offset, offset, labels)
         self.dot.tooltip_labels = labels
         self.dot.tooltip_values = values
@@ -469,13 +536,29 @@ class ContinuousFeatureItem(RulerItem):
     bold_label = False
     DOT_ITEM_CLS = ContinuousMovableDotItem
 
-    def __init__(self, name, data_extremes, values, scale, name_offset, offset):
-        diff_ = np.nan_to_num(values[-1] - values[0])
-        k = (data_extremes[1] - data_extremes[0]) / diff_ if diff_ else 0
-        labels = [str(np.round(v * k + data_extremes[0], 1)) for v in values]
+    def __init__(self, name, variable, data_extremes, values, scale,
+                 name_offset, offset):
+        labels = _get_labels(variable, data_extremes, values)
         super().__init__(name, values, scale, name_offset, offset, labels)
         self.dot.tooltip_labels = labels
         self.dot.tooltip_values = values
+
+
+@singledispatch
+def _get_labels(*_):
+    return []
+
+
+@_get_labels.register(DiscreteVariable)
+def _(var: DiscreteVariable, *_):
+    return np.array(var.values)
+
+
+@_get_labels.register(ContinuousVariable)
+def _(_: ContinuousVariable, data_extremes: List, values: np.ndarray, *__):
+    diff_ = np.nan_to_num(values[-1] - values[0])
+    k = (data_extremes[1] - data_extremes[0]) / diff_ if diff_ else 0
+    return [str(np.round(v * k + data_extremes[0], 1)) for v in values]
 
 
 class ContinuousFeature2DItem(QGraphicsWidget):
@@ -485,7 +568,8 @@ class ContinuousFeature2DItem(QGraphicsWidget):
     y_diff = 80
     n_tck = 4
 
-    def __init__(self, name, data_extremes, values, scale, name_offset, offset):
+    def __init__(self, name, _, data_extremes, values, scale, name_offset,
+                 offset):
         super().__init__()
         data_start, data_stop = data_extremes[0], data_extremes[1]
         labels = [str(np.round(data_start + (data_stop - data_start) * i /
@@ -573,6 +657,9 @@ class OWNomogram(OWWidget):
         classifier = Input("Classifier", Model)
         data = Input("Data", Table)
 
+    class Outputs:
+        features = Output("Features", AttributeList)
+
     MAX_N_ATTRS = 1000
     POINT_SCALE = 0
     ALIGN_LEFT = 0
@@ -620,7 +707,7 @@ class OWNomogram(OWWidget):
         box = gui.vBox(self.controlArea, "Target class")
         self.class_combo = gui.comboBox(
             box, self, "target_class_index", callback=self._class_combo_changed,
-            contentsLength=12)
+            contentsLength=12, searchable=True)
         self.norm_check = gui.checkBox(
             box, self, "normalize_probabilities", "Normalize probabilities",
             hidden=True, callback=self.update_scene,
@@ -717,6 +804,17 @@ class OWNomogram(OWWidget):
         for view in (top_view, mid_view, bottom_view):
             self.mainArea.layout().addWidget(view)
 
+        self.dot_animator = GraphicsColorAnimator(
+            self, 3000,
+            [
+                (0.9, DOT_COLOR),
+                (0.925, DOT_COLOR.lighter(115)),
+                (0.95, DOT_COLOR),
+                (0.975, DOT_COLOR.lighter(115)),
+                (1.0, DOT_COLOR)
+            ]
+        )
+
     def _class_combo_changed(self):
         with np.errstate(invalid='ignore'):
             coeffs = [np.nan_to_num(p[self.target_class_index] /
@@ -739,7 +837,10 @@ class OWNomogram(OWWidget):
         self.norm_check.setHidden(True)
         self.cont_feature_dim_combo.setEnabled(True)
         if self.domain is not None:
-            self.class_combo.addItems(self.domain.class_vars[0].values)
+            values = self.domain.class_vars[0].values
+            if values:
+                self.class_combo.addItems(values)
+                self.target_class_index = 0
             if len(self.domain.attributes) > self.MAX_N_ATTRS:
                 self.display_index = 1
             if len(self.domain.class_vars[0].values) > 2:
@@ -777,7 +878,6 @@ class OWNomogram(OWWidget):
         self.calculate_log_odds_ratios()
         self.calculate_log_reg_coefficients()
         self.update_controls()
-        self.target_class_index = 0
         self.openContext(self.domain.class_var if self.domain is not None
                          else None)
         self.points = self.log_odds_ratios or self.log_reg_coeffs
@@ -824,7 +924,7 @@ class OWNomogram(OWWidget):
         if len(self.domain.class_var.values) == 2:
             self.b0 = np.hstack((self.b0 * (-1), self.b0))
             coeffs = np.vstack((coeffs * (-1), coeffs))
-        self.log_reg_coeffs = [coeffs[:, ranges[i]] for i in range(len(attrs))]
+        self.log_reg_coeffs = [coeffs[:, r] for r in ranges]
         self.log_reg_coeffs_orig = self.log_reg_coeffs.copy()
 
         min_values = nanmin(self.data.X, axis=0)
@@ -836,17 +936,19 @@ class OWNomogram(OWWidget):
                 coef = self.log_reg_coeffs[i]
                 self.log_reg_coeffs[i] = np.hstack((coef * min_t, coef * max_t))
                 self.log_reg_cont_data_extremes.append(
-                    [sorted([min_t, max_t], reverse=(c < 0)) for c in coef])
+                    [sorted([min_t, max_t], reverse=(c < 0)) for c in coef.flat])
             else:
                 self.log_reg_cont_data_extremes.append([None])
 
     def update_scene(self):
         self.clear_scene()
         if self.domain is None or not len(self.points[0]):
+            self.Outputs.features.send(None)
             return
 
         n_attrs = self.n_attributes if self.display_index else int(1e10)
         attr_inds, attributes = zip(*self.get_ordered_attributes()[:n_attrs])
+        self.Outputs.features.send(AttributeList(attributes))
 
         name_items = [QGraphicsTextItem(attr.name) for attr in attributes]
         point_text = QGraphicsTextItem("Points")
@@ -886,6 +988,11 @@ class OWNomogram(OWWidget):
             item.dot.probs_dot = probs_item.dot
             item.dot.vertical_line = self.hidden_vertical_line
 
+        self.dot_animator.setGraphicsItems(
+            [item.dot for item in self.feature_items.values()]
+        )
+        self.dot_animator.start()
+
         self.nomogram = nomogram = NomogramItem()
         nomogram.add_items([nomogram_head, self.nomogram_main, nomogram_foot])
         self.scene.addItem(nomogram)
@@ -900,12 +1007,40 @@ class OWNomogram(OWWidget):
 
         # Clip top and bottom (60 and 150) parts from the main view
         self.view.setSceneRect(rect.x(), rect.y() + 80, rect.width() - 10, rect.height() - 160)
-        self.view.viewport().setMaximumHeight(rect.height() - 160)
+        self.view.viewport().setMaximumHeight(int(rect.height() - 160))
         # Clip main part from top/bottom views
         # below point values are imprecise (less/more than required) but this
         # is not a problem due to clipped scene content still being drawn
         self.top_view.setSceneRect(rect.x(), rect.y() + 3, rect.width() - 10, 20)
         self.bottom_view.setSceneRect(rect.x(), rect.height() - 110, rect.width() - 10, 30)
+
+    @staticmethod
+    def _adjust_scale(attributes, points, max_width, diff, attr_inds,
+                      log_reg_cont_data_extremes, cls_index):
+        if not diff:
+            return max_width
+
+        def offset(name, point):
+            text_ = QGraphicsTextItem(name).boundingRect()
+            return scale * point + text_.width() / 2
+
+        lr = log_reg_cont_data_extremes
+        scale = max_width / diff
+        names = list(chain.from_iterable(
+            [_get_labels(a, lr and lr[i] and lr[i][0] and lr[i][cls_index],
+                         OWNomogram.get_ruler_values(p.min(), p.max(),
+                                                     scale * p.ptp(), False))
+             for i, a, p in zip(attr_inds, attributes, points)]))
+        points = list(chain.from_iterable(points))
+
+        old_scale = scale + 1
+        while old_scale > scale:
+            old_scale = scale
+            offsets = [offset(n, p) for n, p in zip(names, points)]
+            most_right_name = names[np.argmax(offsets)]
+            text = QGraphicsTextItem(most_right_name).boundingRect()
+            scale = (max_width - text.width() / 2) / diff
+        return scale
 
     def create_main_nomogram(self, attributes, attr_inds, name_items, points,
                              max_width, point_text, name_offset):
@@ -915,7 +1050,10 @@ class OWNomogram(OWWidget):
         values = self.get_ruler_values(min_p, max_p, max_width)
         min_p, max_p = min(values), max(values)
         diff_ = np.nan_to_num(max_p - min_p)
-        scale_x = max_width / diff_ if diff_ else max_width
+        scale_x = self._adjust_scale(
+            attributes, points, max_width, diff_, attr_inds,
+            self.log_reg_cont_data_extremes, cls_index
+        )
 
         nomogram_header = NomogramItem()
         point_item = RulerItem(point_text, values, scale_x, name_offset,
@@ -929,16 +1067,17 @@ class OWNomogram(OWWidget):
 
         feature_items = [
             DiscreteFeatureItem(
-                name_item, attr.values, point,
+                name_item, attr, point,
                 scale_x, name_offset, - scale_x * min_p)
             if attr.is_discrete else
             cont_feature_item_class(
-                name_item, self.log_reg_cont_data_extremes[i][cls_index],
+                name_item, attr, self.log_reg_cont_data_extremes[i][cls_index],
                 self.get_ruler_values(
                     point.min(), point.max(),
                     scale_x * point.ptp(), False),
                 scale_x, name_offset, - scale_x * min_p)
-            for i, attr, name_item, point in zip(attr_inds, attributes, name_items, points)]
+            for i, attr, name_item, point in
+            zip(attr_inds, attributes, name_items, points)]
 
         self.nomogram_main.add_items(feature_items)
         self.feature_items = OrderedDict(sorted(zip(attr_inds, feature_items)))
@@ -1095,7 +1234,7 @@ class OWNomogram(OWWidget):
     def _init_feature_marker_values(self):
         self.feature_marker_values = []
         cls_index = self.target_class_index
-        instances = Table(self.domain, self.instances) \
+        instances = self.instances.transform(self.domain) \
             if self.instances else None
         values = []
         for i, attr in enumerate(self.domain.attributes):
@@ -1127,6 +1266,7 @@ class OWNomogram(OWWidget):
         self.nomogram_main = None
         self.vertical_line = None
         self.hidden_vertical_line = None
+        self.dot_animator.clear()
         self.scene.clear()
 
     def send_report(self):
@@ -1139,6 +1279,7 @@ class OWNomogram(OWWidget):
         for attr in preprocessed.attributes:
             cv = attr._compute_value.variable._compute_value
             var = cv.variable if cv else original[attr.name]
+            var = original[var.name] if var.name in original else attr
             if var in attrs:    # the reason for OrderedDict
                 continue
             attrs[var] = None   # we only need keys
@@ -1185,6 +1326,14 @@ class OWNomogram(OWWidget):
                                   (sorted_values[i] - sorted_values[i - 1])
         return sorted_coefficients[i - 1] * sorted_values[i - 1] * k + \
                sorted_coefficients[i] * sorted_values[i] * (1 - k)
+
+    def reset_settings(self):
+        with warnings.catch_warnings():
+            # setting target_class_index will trigger this innocent warning
+            warnings.filterwarnings(
+                "ignore", "combo box 'target_class_index' is empty")
+            self._reset_settings()
+        self.update_scene()
 
 
 if __name__ == "__main__":  # pragma: no cover

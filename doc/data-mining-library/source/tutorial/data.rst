@@ -8,15 +8,15 @@ This section describes how to load the data in Orange. We also show how to explo
 Data Input
 ----------
 
-..  index:: 
+..  index::
     single: data; input
 
-Orange can read files in native tab-delimited format, or can load data from any of the major standard spreadsheet file types, like CSV and Excel. Native format starts with a header row with feature (column) names. The second header row gives the attribute type, which can be continuous, discrete, time, or string. The third header line contains meta information to identify dependent features (class), irrelevant features (ignore) or meta features (meta).
+Orange can read files in proprietary tab-delimited format, or can load data from any of the major standard spreadsheet file types, like CSV and Excel. Native format starts with a header row with feature (column) names. The second header row gives the attribute type, which can be numeric, categorical, time, or string. The third header line contains meta information to identify dependent features (class), irrelevant features (ignore) or meta features (meta).
 More detailed specification is available in :doc:`../reference/data.io`.
 Here are the first few lines from a dataset :download:`lenses.tab <code/lenses.tab>`::
 
     age       prescription  astigmatic    tear_rate     lenses
-    discrete  discrete      discrete      discrete      discrete 
+    discrete  discrete      discrete      discrete      discrete
                                                         class
     young     myope         no            reduced       none
     young     myope         no            normal        soft
@@ -28,7 +28,7 @@ Here are the first few lines from a dataset :download:`lenses.tab <code/lenses.t
 Values are tab-limited. This dataset has four attributes (age of the patient, spectacle prescription, notion on astigmatism, and information on tear production rate) and an associated three-valued dependent variable encoding lens prescription for the patient (hard contact lenses, soft contact lenses, no lenses). Feature descriptions could use one letter only, so the header of this dataset could also read::
 
     age       prescription  astigmatic    tear_rate     lenses
-    d         d             d             d             d 
+    d         d             d             d             d
                                                         c
 
 The rest of the table gives the data. Note that there are 5 instances in our table above. For the full dataset, check out or download :download:`lenses.tab <code/lenses.tab>`) to a target directory. You can also skip this step as Orange comes preloaded with several demo datasets, lenses being one of them. Now, open a python shell, import Orange and load the data:
@@ -40,12 +40,12 @@ The rest of the table gives the data. Note that there are 5 instances in our tab
 Note that for the file name no suffix is needed, as Orange checks if any files in the current directory are of a readable type. The call to ``Orange.data.Table`` creates an object called ``data`` that holds your dataset and information about the lenses domain:
 
     >>> data.domain.attributes
-    (DiscreteVariable('age', values=['pre-presbyopic', 'presbyopic', 'young']),
-     DiscreteVariable('prescription', values=['hypermetrope', 'myope']),
-     DiscreteVariable('astigmatic', values=['no', 'yes']),
-     DiscreteVariable('tear_rate', values=['normal', 'reduced']))
+    (DiscreteVariable('age', values=('pre-presbyopic', 'presbyopic', 'young')),
+     DiscreteVariable('prescription', values=('hypermetrope', 'myope')),
+     DiscreteVariable('astigmatic', values=('no', 'yes')),
+     DiscreteVariable('tear_rate', values=('normal', 'reduced')))
     >>> data.domain.class_var
-    DiscreteVariable('lenses', values=['hard', 'none', 'soft'])
+    DiscreteVariable('lenses', values=('hard', 'none', 'soft'))
     >>> for d in data[:3]:
        ...:     print(d)
        ...:
@@ -59,6 +59,61 @@ The following script wraps-up everything we have done so far and lists first 5 d
 .. literalinclude:: code/data-lenses.py
 
 Note that data is an object that holds both the data and information on the domain. We show above how to access attribute and class names, but there is much more information there, including that on feature type, set of values for categorical features, and other.
+
+Creating a Data Table
+---------------------
+
+To create a data table from scratch, one needs two things, a `domain <../reference/data.domain.html>`_ and the data. The domain is the description of the variables, i.e. column names, types, roles, etc.
+
+First, we create the said domain. We will create three types of variables, numeric (ContiniousVariable), categorical (DiscreteVariable) and text (StringVariable). Numeric and categorical variables will be used a features (also known as X), while the text variable will be used as a meta variable.
+
+    >>> from Orange.data import Domain, ContinuousVariable, 
+        DiscreteVariable, StringVariable
+    >>>
+    >>> domain = Domain([ContinuousVariable("col1"),
+                         DiscreteVariable("col2", values=["red", "blue"])], 
+                         metas=[StringVariable("col3")])
+
+Now, we will build the data with numpy.
+
+    >>> import numpy as np
+    >>>
+    >>> column1 = np.array([1.2, 1.4, 1.5, 1.1, 1.2])
+    >>> column2 = np.array([0, 1, 1, 1, 0])
+    >>> column3 = np.array(["U13", "U14", "U15", "U16", "U17"], dtype=object)
+
+Two things to note here. column2 has values 0 and 1, even though we specified it will be a categorical variable with values "red" and "blue". X (features in the data) can only be numbers, so the numpy matrix will contain numbers, while Orange will handle the categorical representation internally. 0 will be mapped to the value "red" and 1 to "blue" (in the order, specified in the domain).
+
+Text variable requires ``dtype=object`` for numpy to handle it correctly.
+
+Next, variables have to be transformed to a matrix.
+
+    >>> X = np.column_stack((column1, column2))
+    >>> M = column3.reshape(-1, 1)
+
+Finally, we create a table. We need a domain and variables, which can be passed as X (features), Y (class variable) or metas.
+
+    >>> table = Table.from_numpy(domain, X=X, metas=M)
+    >>> print(table)
+    >>> [[1.2, red] {U13},
+    [1.4, blue] {U14},
+    [1.5, blue] {U15},
+    [1.1, blue] {U16},
+    [1.2, red] {U17}]
+
+To add a class variable to the table, the procedure would be the same, with the class variable passed as Y (e.g. ``table = Table.from_numpy(domain, X=X, Y=Y, metas=M)``).
+
+To add a single column to the table, one can use the ``Table.add_column()`` method.
+
+    >>> new_var = DiscreteVariable("var4", values=["one", "two"])
+    >>> var4 = np.array([0, 1, 0, 0, 1]) # no reshaping necessary
+    >>> table = table.add_column(new_var, var4)
+    >>> print(table)
+    >>> [[1.2, red, one] {U13},
+    [1.4, blue, two] {U14},
+    [1.5, blue, one] {U15},
+    [1.1, blue, one] {U16},
+    [1.2, red, two] {U17}]
 
 Saving the Data
 ---------------
@@ -185,7 +240,7 @@ We can also construct a (classless) dataset from a numpy array::
 
 If we want to provide meaninful names to attributes, we need to construct an appropriate data domain::
 
-    >>> domain = Orange.data.Domain([Orange.data.ContinuousVariable("lenght"), 
+    >>> domain = Orange.data.Domain([Orange.data.ContinuousVariable("lenght"),
                                      Orange.data.ContinuousVariable("width")])
     >>> data = Orange.data.Table(domain, X)
     >>> data.domain
@@ -274,7 +329,7 @@ First three lines of the output of this script are::
 A single-liner that reports on number of data instances with at least one missing value is::
 
     >>> sum(any(np.isnan(d[x]) for x in data.domain.attributes) for d in data)
-    203 
+    203
 
 .. sum([np.any(np.isnan(x)) for x in data.X])
 

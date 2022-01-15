@@ -10,7 +10,6 @@ from sklearn.impute import SimpleImputer
 
 import Orange.data
 from Orange.data.filter import HasClass
-from Orange.preprocess.util import _RefuseDataInConstructor
 from Orange.statistics import distribution
 from Orange.util import Reprable, Enum, deprecated
 from . import impute, discretize, transformation
@@ -18,10 +17,11 @@ from . import impute, discretize, transformation
 __all__ = ["Continuize", "Discretize", "Impute", "RemoveNaNRows",
            "SklImpute", "Normalize", "Randomize", "Preprocess",
            "RemoveConstant", "RemoveNaNClasses", "RemoveNaNColumns",
-           "ProjectPCA", "ProjectCUR", "Scale"]
+           "ProjectPCA", "ProjectCUR", "Scale", "RemoveSparse",
+           "AdaptiveNormalize", "PreprocessorList"]
 
 
-class Preprocess(_RefuseDataInConstructor, Reprable):
+class Preprocess(Reprable):
     """
     A generic preprocessor base class.
 
@@ -102,11 +102,11 @@ class Discretize(Preprocess):
             else:
                 return var
 
-        def discretized(vars, do_discretize):
+        def discretized(vars_, do_discretize):
             if do_discretize:
-                vars = (transform(var) for var in vars)
-                vars = [var for var in vars if var is not None]
-            return vars
+                vars_ = (transform(var) for var in vars_)
+                vars_ = [var for var in vars_ if var is not None]
+            return vars_
 
         method = self.method or discretize.EqualFreq()
         domain = Orange.data.Domain(
@@ -171,7 +171,8 @@ class SklImpute(Preprocess):
         domain = Orange.data.Domain(features, data.domain.class_vars,
                                     data.domain.metas)
         new_data = data.transform(domain)
-        new_data.X = X
+        with new_data.unlocked(new_data.X):
+            new_data.X = X
         return new_data
 
 
@@ -269,6 +270,8 @@ class Normalize(Preprocess):
     Parameters
     ----------
     zero_based : bool (default=True)
+        Only used when `norm_type=NormalizeBySpan`.
+
         Determines the value used as the “low” value of the variable.
         It determines the interval for normalized continuous variables
         (either [-1, 1] or [0, 1]).
@@ -286,6 +289,14 @@ class Normalize(Preprocess):
     transform_class : bool (default=False)
         If True the class is normalized as well.
 
+    center : bool (default=True)
+        Only used when `norm_type=NormalizeBySD`.
+
+        Whether or not to center the data so it has mean zero.
+
+    normalize_datetime : bool (default=False)
+
+
     Examples
     --------
     >>> from Orange.data import Table
@@ -301,10 +312,14 @@ class Normalize(Preprocess):
     def __init__(self,
                  zero_based=True,
                  norm_type=NormalizeBySD,
-                 transform_class=False):
+                 transform_class=False,
+                 center=True,
+                 normalize_datetime=False):
         self.zero_based = zero_based
         self.norm_type = norm_type
         self.transform_class = transform_class
+        self.center = center
+        self.normalize_datetime = normalize_datetime
 
     def __call__(self, data):
         """
@@ -331,10 +346,14 @@ class Normalize(Preprocess):
             # matrix, which requires too much memory. For example, this is used for Bag of Words
             # models where normalization is not really needed.
             return data
+
         normalizer = normalize.Normalizer(
             zero_based=self.zero_based,
             norm_type=self.norm_type,
-            transform_class=self.transform_class)
+            transform_class=self.transform_class,
+            center=self.center,
+            normalize_datetime=self.normalize_datetime
+        )
         return normalizer(data)
 
 
@@ -396,15 +415,17 @@ class Randomize(Preprocess):
         rstate = np.random.RandomState(self.rand_seed)
         # ensure the same seed is not used to shuffle X and Y at the same time
         r1, r2, r3 = rstate.randint(0, 2 ** 32 - 1, size=3, dtype=np.int64)
-        if self.rand_type & Randomize.RandomizeClasses:
-            new_data.Y = self.randomize(new_data.Y, r1)
-        if self.rand_type & Randomize.RandomizeAttributes:
-            new_data.X = self.randomize(new_data.X, r2)
-        if self.rand_type & Randomize.RandomizeMetas:
-            new_data.metas = self.randomize(new_data.metas, r3)
+        with new_data.unlocked():
+            if self.rand_type & Randomize.RandomizeClasses:
+                new_data.Y = self.randomize(new_data.Y, r1)
+            if self.rand_type & Randomize.RandomizeAttributes:
+                new_data.X = self.randomize(new_data.X, r2)
+            if self.rand_type & Randomize.RandomizeMetas:
+                new_data.metas = self.randomize(new_data.metas, r3)
         return new_data
 
-    def randomize(self, table, rand_state=None):
+    @staticmethod
+    def randomize(table, rand_state=None):
         rstate = np.random.RandomState(rand_state)
         if sp.issparse(table):
             table = table.tocsc()  # type: sp.spmatrix
@@ -512,8 +533,6 @@ class Scale(Preprocess):
             factor = 1 / s
             transformed_var = var.copy(
                 compute_value=transformation.Normalizer(var, c, factor))
-            if s != 1:
-                transformed_var.number_of_decimals = 3
             return transformed_var
 
         newvars = []
@@ -525,18 +544,6 @@ class Scale(Preprocess):
         domain = Orange.data.Domain(newvars, data.domain.class_vars,
                                     data.domain.metas)
         return data.transform(domain)
-
-
-class ApplyDomain(Preprocess):
-    def __init__(self, domain, name):
-        self._domain = domain
-        self._name = name
-
-    def __call__(self, data):
-        return data.transform(self._domain)
-
-    def __str__(self):
-        return self._name
 
 
 class PreprocessorList(Preprocess):
@@ -564,3 +571,97 @@ class PreprocessorList(Preprocess):
         for pp in self.preprocessors:
             data = pp(data)
         return data
+
+class RemoveSparse(Preprocess):
+    """
+    Filter out the features with too many (>threshold) zeros or missing values. Threshold is user defined.
+
+    Parameters
+    ----------
+    threshold: int or float
+        if >= 1, the argument represents the allowed number of 0s or NaNs;
+        if below 1, it represents the allowed proportion of 0s or NaNs
+    filter0: bool
+        if True (default), preprocessor counts 0s, otherwise NaNs
+    """
+    def __init__(self, threshold=0.05, filter0=True):
+        self.filter0 = filter0
+        self.threshold = threshold
+
+    def __call__(self, data):
+        threshold = self.threshold
+        if self.threshold < 1:
+            threshold *= data.X.shape[0]
+
+        if self.filter0:
+            if sp.issparse(data.X):
+                data_csc = sp.csc_matrix(data.X)
+                h, w = data_csc.shape
+                sparseness = [h - data_csc[:, i].count_nonzero()
+                              for i in range(w)]
+            else:
+                sparseness = data.X.shape[0] - np.count_nonzero(data.X, axis=0)
+        else:  # filter by nans
+            if sp.issparse(data.X):
+                data_csc = sp.csc_matrix(data.X)
+                sparseness = [np.sum(np.isnan(data.X[:, i].data))
+                              for i in range(data_csc.shape[1])]
+            else:
+                sparseness = np.sum(np.isnan(data.X), axis=0)
+        att = [a for a, s in zip(data.domain.attributes, sparseness)
+               if s <= threshold]
+        domain = Orange.data.Domain(att, data.domain.class_vars,
+                                    data.domain.metas)
+        return data.transform(domain)
+
+
+class AdaptiveNormalize(Preprocess):
+    """
+    Construct a preprocessors that normalizes or merely scales the data.
+    If the input is sparse, data is only scaled, to avoid turning it to
+    dense. Parameters are diveded to those passed to Normalize or Scale
+    class. Scaling takes only scale parameter.
+     If the user wants to have more options with scaling,
+    they should use the preprocessing widget.
+    For more details, check Scale and Normalize widget.
+
+    Parameters
+    ----------
+
+    zero_based : bool (default=True)
+        passed to Normalize
+
+    norm_type : NormTypes (default: Normalize.NormalizeBySD)
+        passed to Normalize
+
+    transform_class : bool (default=False)
+        passed to Normalize
+
+    center : bool(default=True)
+        passed to Normalize
+
+    normalize_datetime : bool (default=False)
+        passed to Normalize
+
+    scale : ScaleTypes (default: Scale.Span)
+        passed to Scale
+    """
+
+    def __init__(self,
+                 zero_based=True,
+                 norm_type=Normalize.NormalizeBySD,
+                 transform_class=False,
+                 normalize_datetime=False,
+                 center=True,
+                 scale=Scale.Span):
+        self.normalize_pps = Normalize(zero_based,
+                                       norm_type,
+                                       transform_class,
+                                       center,
+                                       normalize_datetime)
+        self.scale_pps = Scale(center=Scale.NoCentering, scale=scale)
+
+    def __call__(self, data):
+        if sp.issparse(data.X):
+            return self.scale_pps(data)
+        return self.normalize_pps(data)

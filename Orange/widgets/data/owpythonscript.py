@@ -1,32 +1,59 @@
 import sys
 import os
 import code
-import keyword
 import itertools
+import tokenize
 import unicodedata
 from unittest.mock import patch
+
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
+
+import pygments.style
+from pygments.token import Comment, Keyword, Number, String, Punctuation, Operator, Error, Name
+from qtconsole.pygments_highlighter import PygmentsHighlighter
 
 from AnyQt.QtWidgets import (
     QPlainTextEdit, QListView, QSizePolicy, QMenu, QSplitter, QLineEdit,
     QAction, QToolButton, QFileDialog, QStyledItemDelegate,
-    QStyleOptionViewItem, QPlainTextDocumentLayout
-)
+    QStyleOptionViewItem, QPlainTextDocumentLayout,
+    QLabel, QWidget, QHBoxLayout, QApplication)
 from AnyQt.QtGui import (
-    QColor, QBrush, QPalette, QFont, QTextDocument,
-    QSyntaxHighlighter, QTextCharFormat, QTextCursor, QKeySequence,
+    QColor, QBrush, QPalette, QFont, QTextDocument, QTextCharFormat,
+    QTextCursor, QKeySequence, QFontMetrics, QPainter
 )
-from AnyQt.QtCore import Qt, QRegExp, QByteArray, QItemSelectionModel
+from AnyQt.QtCore import (
+    Qt, QByteArray, QItemSelectionModel, QSize, QRectF, QMimeDatabase,
+)
+
+from orangewidget.workflow.drophandler import SingleFileDropHandler
 
 from Orange.data import Table
 from Orange.base import Learner, Model
-from Orange.widgets import widget, gui
+from Orange.util import interleave
+from Orange.widgets import gui
+from Orange.widgets.data.utils.pythoneditor.editor import PythonEditor
 from Orange.widgets.utils import itemmodels
 from Orange.widgets.settings import Setting
 from Orange.widgets.utils.widgetpreview import WidgetPreview
-from Orange.widgets.widget import OWWidget, Input, Output
+from Orange.widgets.widget import OWWidget, MultiInput, Output
+
+if TYPE_CHECKING:
+    from typing_extensions import TypedDict
 
 __all__ = ["OWPythonScript"]
 
+
+DEFAULT_SCRIPT = """import numpy as np
+from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable
+
+domain = Domain([ContinuousVariable("age"),
+                 ContinuousVariable("height"),
+                 DiscreteVariable("gender", values=("M", "F"))])
+arr = np.array([
+  [25, 186, 0],
+  [30, 164, 1]])
+out_data = Table.from_numpy(domain, arr)
+"""
 
 def text_format(foreground=Qt.black, weight=QFont.Normal):
     fmt = QTextCharFormat()
@@ -35,115 +62,247 @@ def text_format(foreground=Qt.black, weight=QFont.Normal):
     return fmt
 
 
-class PythonSyntaxHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+def read_file_content(filename, limit=None):
+    try:
+        with open(filename, encoding="utf-8", errors='strict') as f:
+            text = f.read(limit)
+            return text
+    except (OSError, UnicodeDecodeError):
+        return None
 
-        self.keywordFormat = text_format(Qt.blue, QFont.Bold)
-        self.stringFormat = text_format(Qt.darkGreen)
-        self.defFormat = text_format(Qt.black, QFont.Bold)
-        self.commentFormat = text_format(Qt.lightGray)
-        self.decoratorFormat = text_format(Qt.darkGray)
 
-        self.keywords = list(keyword.kwlist)
+# pylint: disable=pointless-string-statement
+"""
+Adapted from jupyter notebook, which was adapted from GitHub.
 
-        self.rules = [(QRegExp(r"\b%s\b" % kwd), self.keywordFormat)
-                      for kwd in self.keywords] + \
-                     [(QRegExp(r"\bdef\s+([A-Za-z_]+[A-Za-z0-9_]+)\s*\("),
-                       self.defFormat),
-                      (QRegExp(r"\bclass\s+([A-Za-z_]+[A-Za-z0-9_]+)\s*\("),
-                       self.defFormat),
-                      (QRegExp(r"'.*'"), self.stringFormat),
-                      (QRegExp(r'".*"'), self.stringFormat),
-                      (QRegExp(r"#.*"), self.commentFormat),
-                      (QRegExp(r"@[A-Za-z_]+[A-Za-z0-9_]+"),
-                       self.decoratorFormat)]
+Highlighting styles are applied with pygments.
 
-        self.multilineStart = QRegExp(r"(''')|" + r'(""")')
-        self.multilineEnd = QRegExp(r"(''')|" + r'(""")')
+pygments does not support partial highlighting; on every character
+typed, it performs a full pass of the code. If performance is ever
+an issue, revert to prior commit, which uses Qutepart's syntax
+highlighting implementation.
+"""
+SYNTAX_HIGHLIGHTING_STYLES = {
+    'Light': {
+        Punctuation: "#000",
+        Error: '#f00',
 
+        Keyword: 'bold #008000',
+
+        Name: '#212121',
+        Name.Function: '#00f',
+        Name.Variable: '#05a',
+        Name.Decorator: '#aa22ff',
+        Name.Builtin: '#008000',
+        Name.Builtin.Pseudo: '#05a',
+
+        String: '#ba2121',
+
+        Number: '#080',
+
+        Operator: 'bold #aa22ff',
+        Operator.Word: 'bold #008000',
+
+        Comment: 'italic #408080',
+    },
+    'Dark': {
+        Punctuation: "#fff",
+        Error: '#f00',
+
+        Keyword: 'bold #4caf50',
+
+        Name: '#e0e0e0',
+        Name.Function: '#1e88e5',
+        Name.Variable: '#42a5f5',
+        Name.Decorator: '#aa22ff',
+        Name.Builtin: '#43a047',
+        Name.Builtin.Pseudo: '#42a5f5',
+
+        String: '#ff7070',
+
+        Number: '#66bb6a',
+
+        Operator: 'bold #aa22ff',
+        Operator.Word: 'bold #4caf50',
+
+        Comment: 'italic #408080',
+    }
+}
+
+
+def make_pygments_style(scheme_name):
+    """
+    Dynamically create a PygmentsStyle class,
+    given the name of one of the above highlighting schemes.
+    """
+    return type(
+        'PygmentsStyle',
+        (pygments.style.Style,),
+        {'styles': SYNTAX_HIGHLIGHTING_STYLES[scheme_name]}
+    )
+
+
+class FakeSignatureMixin:
+    def __init__(self, parent, highlighting_scheme, font):
         super().__init__(parent)
+        self.highlighting_scheme = highlighting_scheme
+        self.setFont(font)
+        self.bold_font = QFont(font)
+        self.bold_font.setBold(True)
 
-    def highlightBlock(self, text):
-        for pattern, format in self.rules:
-            exp = QRegExp(pattern)
-            index = exp.indexIn(text)
-            while index >= 0:
-                length = exp.matchedLength()
-                if exp.captureCount() > 0:
-                    self.setFormat(exp.pos(1), len(str(exp.cap(1))), format)
-                else:
-                    self.setFormat(exp.pos(0), len(str(exp.cap(0))), format)
-                index = exp.indexIn(text, index + length)
+        self.indentation_level = 0
 
-        # Multi line strings
-        start = self.multilineStart
-        end = self.multilineEnd
+        self._char_4_width = QFontMetrics(font).horizontalAdvance('4444')
 
-        self.setCurrentBlockState(0)
-        startIndex, skip = 0, 0
-        if self.previousBlockState() != 1:
-            startIndex, skip = start.indexIn(text), 3
-        while startIndex >= 0:
-            endIndex = end.indexIn(text, startIndex + skip)
-            if endIndex == -1:
-                self.setCurrentBlockState(1)
-                commentLen = len(text) - startIndex
-            else:
-                commentLen = endIndex - startIndex + 3
-            self.setFormat(startIndex, commentLen, self.stringFormat)
-            startIndex, skip = (start.indexIn(text,
-                                              startIndex + commentLen + 3),
-                                3)
+    def setIndent(self, margins_width):
+        self.setContentsMargins(max(0,
+                                    round(margins_width) +
+                                    ((self.indentation_level - 1) * self._char_4_width)),
+                                0, 0, 0)
 
 
-class PythonScriptEditor(QPlainTextEdit):
-    INDENT = 4
+class FunctionSignature(FakeSignatureMixin, QLabel):
+    def __init__(self, parent, highlighting_scheme, font, function_name="python_script"):
+        super().__init__(parent, highlighting_scheme, font)
+        self.signal_prefix = 'in_'
 
-    def __init__(self, widget):
-        super().__init__()
-        self.widget = widget
+        # `def python_script(`
+        self.prefix = ('<b style="color: ' +
+                       self.highlighting_scheme[Keyword].split(' ')[-1] +
+                       ';">def </b>'
+                       '<span style="color: ' +
+                       self.highlighting_scheme[Name.Function].split(' ')[-1] +
+                       ';">' + function_name + '</span>'
+                       '<span style="color: ' +
+                       self.highlighting_scheme[Punctuation].split(' ')[-1] +
+                       ';">(</span>')
 
-    def lastLine(self):
-        text = str(self.toPlainText())
-        pos = self.textCursor().position()
-        index = text.rfind("\n", 0, pos)
-        text = text[index: pos].lstrip("\n")
-        return text
+        # `):`
+        self.affix = ('<span style="color: ' +
+                      self.highlighting_scheme[Punctuation].split(' ')[-1] +
+                      ';">):</span>')
 
-    def keyPressEvent(self, event):
-        self.widget.enable_execute()
-        if event.key() == Qt.Key_Return:
-            if event.modifiers() & (
-                    Qt.ShiftModifier | Qt.ControlModifier | Qt.MetaModifier):
-                self.widget.unconditional_commit()
-                return
-            text = self.lastLine()
-            indent = len(text) - len(text.lstrip())
-            if text.strip() == "pass" or text.strip().startswith("return "):
-                indent = max(0, indent - self.INDENT)
-            elif text.strip().endswith(":"):
-                indent += self.INDENT
-            super().keyPressEvent(event)
-            self.insertPlainText(" " * indent)
-        elif event.key() == Qt.Key_Tab:
-            self.insertPlainText(" " * self.INDENT)
-        elif event.key() == Qt.Key_Backspace:
-            text = self.lastLine()
-            if text and not text.strip():
-                cursor = self.textCursor()
-                for _ in range(min(self.INDENT, len(text))):
-                    cursor.deletePreviousChar()
-            else:
-                super().keyPressEvent(event)
+        self.update_signal_text({})
 
-        else:
-            super().keyPressEvent(event)
+    def update_signal_text(self, signal_values_lengths):
+        if not self.signal_prefix:
+            return
+        lbl_text = self.prefix
+        if len(signal_values_lengths) > 0:
+            for name, value in signal_values_lengths.items():
+                if value == 1:
+                    lbl_text += self.signal_prefix + name + ', '
+                elif value > 1:
+                    lbl_text += self.signal_prefix + name + 's, '
+            lbl_text = lbl_text[:-2]  # shave off the trailing ', '
+        lbl_text += self.affix
+        if self.text() != lbl_text:
+            self.setText(lbl_text)
+            self.update()
+
+
+class ReturnStatement(FakeSignatureMixin, QWidget):
+    def __init__(self, parent, highlighting_scheme, font):
+        super().__init__(parent, highlighting_scheme, font)
+
+        self.indentation_level = 1
+        self.signal_labels = {}
+        self._prefix = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # `return `
+        ret_lbl = QLabel('<b style="color: ' + \
+                         highlighting_scheme[Keyword].split(' ')[-1] + \
+                         ';">return </b>', self)
+        ret_lbl.setFont(self.font())
+        ret_lbl.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(ret_lbl)
+
+        # `out_data[, ]` * 4
+        self.make_signal_labels('out_')
+
+        layout.addStretch()
+        self.setLayout(layout)
+
+    def make_signal_labels(self, prefix):
+        self._prefix = prefix
+        # `in_data[, ]`
+        for i, signal in enumerate(OWPythonScript.signal_names):
+            # adding an empty b tag like this adjusts the
+            # line height to match the rest of the labels
+            signal_display_name = signal
+            signal_lbl = QLabel('<b></b>' + prefix + signal_display_name, self)
+            signal_lbl.setFont(self.font())
+            signal_lbl.setContentsMargins(0, 0, 0, 0)
+            self.layout().addWidget(signal_lbl)
+
+            self.signal_labels[signal] = signal_lbl
+
+            if i >= len(OWPythonScript.signal_names) - 1:
+                break
+
+            comma_lbl = QLabel(', ')
+            comma_lbl.setFont(self.font())
+            comma_lbl.setContentsMargins(0, 0, 0, 0)
+            comma_lbl.setStyleSheet('.QLabel { color: ' +
+                                    self.highlighting_scheme[Punctuation].split(' ')[-1] +
+                                    '; }')
+            self.layout().addWidget(comma_lbl)
+
+    def update_signal_text(self, signal_name, values_length):
+        if not self._prefix:
+            return
+        lbl = self.signal_labels[signal_name]
+        if values_length == 0:
+            text = '<b></b>' + self._prefix + signal_name
+        else:  # if values_length == 1:
+            text = '<b>' + self._prefix + signal_name + '</b>'
+        if lbl.text() != text:
+            lbl.setText(text)
+            lbl.update()
+
+
+class VimIndicator(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.indicator_color = QColor('#33cc33')
+        self.indicator_text = 'normal'
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(self.indicator_color)
+
+        p.save()
+        p.setPen(Qt.NoPen)
+        fm = QFontMetrics(self.font())
+        width = self.rect().width()
+        height = fm.height() + 6
+        rect = QRectF(0, 0, width, height)
+        p.drawRoundedRect(rect, 5, 5)
+        p.restore()
+
+        textstart = (width - fm.width(self.indicator_text)) / 2
+        p.drawText(textstart, height / 2 + 5, self.indicator_text)
+
+    def minimumSizeHint(self):
+        fm = QFontMetrics(self.font())
+        width = round(fm.width(self.indicator_text)) + 10
+        height = fm.height() + 6
+        return QSize(width, height)
 
 
 class PythonConsole(QPlainTextEdit, code.InteractiveConsole):
+    # `locals` is reasonably used as argument name
+    # pylint: disable=redefined-builtin
     def __init__(self, locals=None, parent=None):
         QPlainTextEdit.__init__(self, parent)
         code.InteractiveConsole.__init__(self, locals)
+        self.newPromptPos = 0
         self.history, self.historyInd = [""], 0
         self.loop = self.interact()
         next(self.loop)
@@ -154,7 +313,7 @@ class PythonConsole(QPlainTextEdit, code.InteractiveConsole):
     def updateLocals(self, locals):
         self.locals.update(locals)
 
-    def interact(self, banner=None):
+    def interact(self, banner=None, _=None):
         try:
             sys.ps1
         except AttributeError:
@@ -192,13 +351,14 @@ class PythonConsole(QPlainTextEdit, code.InteractiveConsole):
                 self.resetbuffer()
                 more = 0
 
-    def raw_input(self, prompt):
-        input = str(self.document().lastBlock().previous().text())
-        return input[len(prompt):]
+    def raw_input(self, prompt=""):
+        input_str = str(self.document().lastBlock().previous().text())
+        return input_str[len(prompt):]
 
     def new_prompt(self, prompt):
         self.write(prompt)
         self.newPromptPos = self.textCursor().position()
+        self.repaint()
 
     def write(self, data):
         cursor = QTextCursor(self.document())
@@ -296,25 +456,7 @@ class PythonConsole(QPlainTextEdit, code.InteractiveConsole):
             return
 
 
-def interleave(seq1, seq2):
-    """
-    Interleave elements of `seq2` between consecutive elements of `seq1`.
-
-        >>> list(interleave([1, 3, 5], [2, 4]))
-        [1, 2, 3, 4, 5]
-
-    """
-    iterator1, iterator2 = iter(seq1), iter(seq2)
-    leading = next(iterator1)
-    for element in iterator1:
-        yield leading
-        yield next(iterator2)
-        leading = element
-
-    yield leading
-
-
-class Script(object):
+class Script:
     Modified = 1
     MissingFromFilesystem = 2
 
@@ -324,12 +466,17 @@ class Script(object):
         self.flags = flags
         self.filename = filename
 
+    def asdict(self) -> '_ScriptData':
+        return dict(name=self.name, script=self.script, filename=self.filename)
+
+    @classmethod
+    def fromdict(cls, state: '_ScriptData') -> 'Script':
+        return Script(state["name"], state["script"], filename=state["filename"])
+
 
 class ScriptItemDelegate(QStyledItemDelegate):
-    def __init__(self, parent):
-        super().__init__(parent)
-
-    def displayText(self, script, locale):
+    # pylint: disable=no-self-use
+    def displayText(self, script, _locale):
         if script.flags & Script.Modified:
             return "*" + script.name
         else:
@@ -344,7 +491,7 @@ class ScriptItemDelegate(QStyledItemDelegate):
             option.palette.setColor(QPalette.Highlight, QColor(Qt.darkRed))
         super().paint(painter, option, index)
 
-    def createEditor(self, parent, option, index):
+    def createEditor(self, parent, _option, _index):
         return QLineEdit(parent)
 
     def setEditorData(self, editor, index):
@@ -364,22 +511,34 @@ def select_row(view, row):
                     QItemSelectionModel.ClearAndSelect)
 
 
-class OWPythonScript(widget.OWWidget):
+if TYPE_CHECKING:
+    # pylint: disable=used-before-assignment
+    _ScriptData = TypedDict("_ScriptData", {
+        "name": str, "script": str, "filename": Optional[str]
+    })
+
+
+class OWPythonScript(OWWidget):
     name = "Python Script"
     description = "Write a Python script and run it on input data or models."
+    category = "Transform"
     icon = "icons/PythonScript.svg"
     priority = 3150
-    keywords = ["file", "program"]
+    keywords = ["program", "function"]
 
     class Inputs:
-        data = Input("Data", Table, replaces=["in_data"],
-                     default=True, multiple=True)
-        learner = Input("Learner", Learner, replaces=["in_learner"],
-                        default=True, multiple=True)
-        classifier = Input("Classifier", Model, replaces=["in_classifier"],
-                           default=True, multiple=True)
-        object = Input("Object", object, replaces=["in_object"],
-                       default=False, multiple=True)
+        data = MultiInput(
+            "Data", Table, replaces=["in_data"], default=True
+        )
+        learner = MultiInput(
+            "Learner", Learner, replaces=["in_learner"], default=True
+        )
+        classifier = MultiInput(
+            "Classifier", Model, replaces=["in_classifier"], default=True
+        )
+        object = MultiInput(
+            "Object", object, replaces=["in_object"], default=False
+        )
 
     class Outputs:
         data = Output("Data", Table, replaces=["out_data"])
@@ -389,11 +548,17 @@ class OWPythonScript(widget.OWWidget):
 
     signal_names = ("data", "learner", "classifier", "object")
 
-    libraryListSource = \
-        Setting([Script("Hello world", "print('Hello world')\n")])
+    settings_version = 2
+    scriptLibrary: 'List[_ScriptData]' = Setting([{
+        "name": "Table from numpy",
+        "script": DEFAULT_SCRIPT,
+        "filename": None
+    }])
     currentScriptIndex = Setting(0)
-    splitterState = Setting(None)
-    auto_execute = Setting(True)
+    scriptText: Optional[str] = Setting(None, schema_only=True)
+    splitterState: Optional[bytes] = Setting(None)
+
+    vimModeEnabled = Setting(False)
 
     class Error(OWWidget.Error):
         pass
@@ -402,22 +567,114 @@ class OWPythonScript(widget.OWWidget):
         super().__init__()
 
         for name in self.signal_names:
-            setattr(self, name, {})
+            setattr(self, name, [])
 
-        for s in self.libraryListSource:
-            s.flags = 0
+        self.splitCanvas = QSplitter(Qt.Vertical, self.mainArea)
+        self.mainArea.layout().addWidget(self.splitCanvas)
 
-        self._cachedDocuments = {}
+        # Styling
 
-        self.infoBox = gui.vBox(self.controlArea, 'Info')
-        gui.label(
-            self.infoBox, self,
-            "<p>Execute python script.</p><p>Input variables:<ul><li> " +
-            "<li>".join(map("in_{0}, in_{0}s".format, self.signal_names)) +
-            "</ul></p><p>Output variables:<ul><li>" +
-            "<li>".join(map("out_{0}".format, self.signal_names)) +
-            "</ul></p>"
+        self.defaultFont = defaultFont = (
+            'Menlo' if sys.platform == 'darwin' else
+            'Courier' if sys.platform in ['win32', 'cygwin'] else
+            'DejaVu Sans Mono'
         )
+        self.defaultFontSize = defaultFontSize = 13
+
+        self.editorBox = gui.vBox(self, box="Editor", spacing=4)
+        self.splitCanvas.addWidget(self.editorBox)
+
+        darkMode = QApplication.instance().property('darkMode')
+        scheme_name = 'Dark' if darkMode else 'Light'
+        syntax_highlighting_scheme = SYNTAX_HIGHLIGHTING_STYLES[scheme_name]
+        self.pygments_style_class = make_pygments_style(scheme_name)
+
+        eFont = QFont(defaultFont)
+        eFont.setPointSize(defaultFontSize)
+
+        # Fake Signature
+
+        self.func_sig = func_sig = FunctionSignature(
+            self.editorBox,
+            syntax_highlighting_scheme,
+            eFont
+        )
+
+        # Editor
+
+        editor = PythonEditor(self)
+        editor.setFont(eFont)
+        editor.setup_completer_appearance((300, 180), eFont)
+
+        # Fake return
+
+        return_stmt = ReturnStatement(
+            self.editorBox,
+            syntax_highlighting_scheme,
+            eFont
+        )
+        self.return_stmt = return_stmt
+
+        # Match indentation
+
+        textEditBox = QWidget(self.editorBox)
+        textEditBox.setLayout(QHBoxLayout())
+        char_4_width = QFontMetrics(eFont).horizontalAdvance('0000')
+
+        @editor.viewport_margins_updated.connect
+        def _(width):
+            func_sig.setIndent(width)
+            textEditMargin = max(0, round(char_4_width - width))
+            return_stmt.setIndent(textEditMargin + width)
+            textEditBox.layout().setContentsMargins(
+                textEditMargin, 0, 0, 0
+            )
+
+        self.text = editor
+        textEditBox.layout().addWidget(editor)
+        self.editorBox.layout().addWidget(func_sig)
+        self.editorBox.layout().addWidget(textEditBox)
+        self.editorBox.layout().addWidget(return_stmt)
+
+        self.editorBox.setAlignment(Qt.AlignVCenter)
+        self.text.setTabStopWidth(4)
+
+        self.text.modificationChanged[bool].connect(self.onModificationChanged)
+
+        # Controls
+
+        self.editor_controls = gui.vBox(self.controlArea, box='Preferences')
+
+        self.vim_box = gui.hBox(self.editor_controls, spacing=20)
+        self.vim_indicator = VimIndicator(self.vim_box)
+
+        vim_sp = QSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        vim_sp.setRetainSizeWhenHidden(True)
+        self.vim_indicator.setSizePolicy(vim_sp)
+
+        def enable_vim_mode():
+            editor.vimModeEnabled = self.vimModeEnabled
+            self.vim_indicator.setVisible(self.vimModeEnabled)
+        enable_vim_mode()
+
+        gui.checkBox(
+            self.vim_box, self, 'vimModeEnabled', 'Vim mode',
+            tooltip="Only for the coolest.",
+            callback=enable_vim_mode
+        )
+        self.vim_box.layout().addWidget(self.vim_indicator)
+        @editor.vimModeIndicationChanged.connect
+        def _(color, text):
+            self.vim_indicator.indicator_color = color
+            self.vim_indicator.indicator_text = text
+            self.vim_indicator.update()
+
+        # Library
+
+        self.libraryListSource = []
+        self._cachedDocuments = {}
 
         self.libraryList = itemmodels.PyListModel(
             [], self,
@@ -429,8 +686,7 @@ class OWPythonScript(widget.OWWidget):
         self.controlBox.layout().setSpacing(1)
 
         self.libraryView = QListView(
-            editTriggers=QListView.DoubleClicked |
-            QListView.EditKeyPressed,
+            editTriggers=QListView.DoubleClicked | QListView.EditKeyPressed,
             sizePolicy=QSizePolicy(QSizePolicy.Ignored,
                                    QSizePolicy.Preferred)
         )
@@ -464,14 +720,17 @@ class OWPythonScript(widget.OWWidget):
 
         new_from_file = QAction("Import Script from File", self)
         save_to_file = QAction("Save Selected Script to File", self)
+        restore_saved = QAction("Undo Changes to Selected Script", self)
         save_to_file.setShortcut(QKeySequence(QKeySequence.SaveAs))
 
         new_from_file.triggered.connect(self.onAddScriptFromFile)
         save_to_file.triggered.connect(self.saveScript)
+        restore_saved.triggered.connect(self.restoreSaved)
 
         menu = QMenu(w)
         menu.addAction(new_from_file)
         menu.addAction(save_to_file)
+        menu.addAction(restore_saved)
         action.setMenu(menu)
         button = w.addAction(action)
         button.setPopupMode(QToolButton.InstantPopup)
@@ -480,25 +739,11 @@ class OWPythonScript(widget.OWWidget):
 
         self.controlBox.layout().addWidget(w)
 
-        auto = gui.auto_commit(self.controlArea, self, "auto_execute", "Run",
-                               checkbox_label="Autorun on new data")
-        self.execute_button, self.autobox = auto.button, auto.checkbox
+        self.execute_button = gui.button(self.buttonsArea, self, 'Run', callback=self.commit)
 
-        self.splitCanvas = QSplitter(Qt.Vertical, self.mainArea)
-        self.mainArea.layout().addWidget(self.splitCanvas)
-
-        self.defaultFont = defaultFont = \
-            "Monaco" if sys.platform == "darwin" else "Courier"
-
-        self.textBox = gui.vBox(self, 'Python Script')
-        self.splitCanvas.addWidget(self.textBox)
-        self.text = PythonScriptEditor(self)
-        self.textBox.layout().addWidget(self.text)
-
-        self.textBox.setAlignment(Qt.AlignVCenter)
-        self.text.setTabStopWidth(4)
-
-        self.text.modificationChanged[bool].connect(self.onModificationChanged)
+        self.run_action = QAction("Run script", self, triggered=self.commit,
+                                  shortcut=QKeySequence(Qt.ControlModifier | Qt.Key_R))
+        self.addAction(self.run_action)
 
         self.saveAction = action = QAction("&Save", self.text)
         action.setToolTip("Save script to file")
@@ -506,70 +751,122 @@ class OWPythonScript(widget.OWWidget):
         action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         action.triggered.connect(self.saveScript)
 
-        self.consoleBox = gui.vBox(self, 'Console')
-        self.splitCanvas.addWidget(self.consoleBox)
+        self.consoleBox = gui.vBox(self.splitCanvas, 'Console')
         self.console = PythonConsole({}, self)
         self.consoleBox.layout().addWidget(self.console)
         self.console.document().setDefaultFont(QFont(defaultFont))
         self.consoleBox.setAlignment(Qt.AlignBottom)
-        self.console.setTabStopWidth(4)
+        self.splitCanvas.setSizes([2, 1])
+        self.controlArea.layout().addStretch(10)
 
+        self._restoreState()
+        self.settingsAboutToBePacked.connect(self._saveState)
+
+    def sizeHint(self) -> QSize:
+        return super().sizeHint().expandedTo(QSize(800, 600))
+
+    def _restoreState(self):
+        self.libraryListSource = [Script.fromdict(s) for s in self.scriptLibrary]
+        self.libraryList.wrap(self.libraryListSource)
         select_row(self.libraryView, self.currentScriptIndex)
 
-        self.splitCanvas.setSizes([2, 1])
+        if self.scriptText is not None:
+            current = self.text.toPlainText()
+            # do not mark scripts as modified
+            if self.scriptText != current:
+                self.text.document().setPlainText(self.scriptText)
+
         if self.splitterState is not None:
             self.splitCanvas.restoreState(QByteArray(self.splitterState))
 
-        self.splitCanvas.splitterMoved[int, int].connect(self.onSpliterMoved)
-        self.controlArea.layout().addStretch(1)
-        self.resize(800, 600)
+    def _saveState(self):
+        self.scriptLibrary = [s.asdict() for s in self.libraryListSource]
+        self.scriptText = self.text.toPlainText()
+        self.splitterState = bytes(self.splitCanvas.saveState())
 
-    def enable_execute(self):
-        self.execute_button.setEnabled(True)
-
-    def handle_input(self, obj, id, signal):
-        id = id[0]
+    def set_input(self, index, obj, signal):
         dic = getattr(self, signal)
-        if obj is None:
-            if id in dic.keys():
-                del dic[id]
-        else:
-            dic[id] = obj
+        dic[index] = obj
+
+    def insert_input(self, index, obj, signal):
+        dic = getattr(self, signal)
+        dic.insert(index, obj)
+
+    def remove_input(self, index, signal):
+        dic = getattr(self, signal)
+        dic.pop(index)
 
     @Inputs.data
-    def set_data(self, data, id):
-        self.handle_input(data, id, "data")
+    def set_data(self, index, data):
+        self.set_input(index, data, "data")
+
+    @Inputs.data.insert
+    def insert_data(self, index, data):
+        self.insert_input(index, data, "data")
+
+    @Inputs.data.remove
+    def remove_data(self, index):
+        self.remove_input(index, "data")
 
     @Inputs.learner
-    def set_learner(self, data, id):
-        self.handle_input(data, id, "learner")
+    def set_learner(self, index, learner):
+        self.set_input(index, learner, "learner")
+
+    @Inputs.learner.insert
+    def insert_learner(self, index, learner):
+        self.insert_input(index, learner, "learner")
+
+    @Inputs.learner.remove
+    def remove_learner(self, index):
+        self.remove_input(index, "learner")
 
     @Inputs.classifier
-    def set_classifier(self, data, id):
-        self.handle_input(data, id, "classifier")
+    def set_classifier(self, index, classifier):
+        self.set_input(index, classifier, "classifier")
+
+    @Inputs.classifier.insert
+    def insert_classifier(self, index, classifier):
+        self.insert_input(index, classifier, "classifier")
+
+    @Inputs.classifier.remove
+    def remove_classifier(self, index):
+        self.remove_input(index, "classifier")
 
     @Inputs.object
-    def set_object(self, data, id):
-        self.handle_input(data, id, "object")
+    def set_object(self, index, object):
+        self.set_input(index, object, "object")
+
+    @Inputs.object.insert
+    def insert_object(self, index, object):
+        self.insert_input(index, object, "object")
+
+    @Inputs.object.remove
+    def remove_object(self, index):
+        self.remove_input(index, "object")
 
     def handleNewSignals(self):
-        self.unconditional_commit()
+        # update fake signature labels
+        self.func_sig.update_signal_text({
+            n: len(getattr(self, n)) for n in self.signal_names
+        })
+
+        self.commit()
 
     def selectedScriptIndex(self):
         rows = self.libraryView.selectionModel().selectedRows()
         if rows:
-            return  [i.row() for i in rows][0]
+            return [i.row() for i in rows][0]
         else:
             return None
 
     def setSelectedScript(self, index):
         select_row(self.libraryView, index)
 
-    def onAddScript(self, *args):
-        self.libraryList.append(Script("New script", "", 0))
+    def onAddScript(self, *_):
+        self.libraryList.append(Script("New script", self.text.toPlainText(), 0))
         self.setSelectedScript(len(self.libraryList) - 1)
 
-    def onAddScriptFromFile(self, *args):
+    def onAddScriptFromFile(self, *_):
         filename, _ = QFileDialog.getOpenFileName(
             self, 'Open Python Script',
             os.path.expanduser("~/"),
@@ -577,24 +874,23 @@ class OWPythonScript(widget.OWWidget):
         )
         if filename:
             name = os.path.basename(filename)
-            # TODO: use `tokenize.detect_encoding`
-            with open(filename, encoding="utf-8") as f:
+            with tokenize.open(filename) as f:
                 contents = f.read()
             self.libraryList.append(Script(name, contents, 0, filename))
             self.setSelectedScript(len(self.libraryList) - 1)
 
-    def onRemoveScript(self, *args):
+    def onRemoveScript(self, *_):
         index = self.selectedScriptIndex()
         if index is not None:
             del self.libraryList[index]
             select_row(self.libraryView, max(index - 1, 0))
 
-    def onSaveScriptToFile(self, *args):
+    def onSaveScriptToFile(self, *_):
         index = self.selectedScriptIndex()
         if index is not None:
             self.saveScript()
 
-    def onSelectedScriptChanged(self, selected, deselected):
+    def onSelectedScriptChanged(self, selected, _deselected):
         index = [i.row() for i in selected.indexes()]
         if index:
             current = index[0]
@@ -606,21 +902,22 @@ class OWPythonScript(widget.OWWidget):
             self.currentScriptIndex = current
 
     def documentForScript(self, script=0):
-        if type(script) != Script:
+        if not isinstance(script, Script):
             script = self.libraryList[script]
-
         if script not in self._cachedDocuments:
             doc = QTextDocument(self)
             doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
             doc.setPlainText(script.script)
             doc.setDefaultFont(QFont(self.defaultFont))
-            doc.highlighter = PythonSyntaxHighlighter(doc)
+            doc.highlighter = PygmentsHighlighter(doc)
+            doc.highlighter.set_style(self.pygments_style_class)
+            doc.setDefaultFont(QFont(self.defaultFont, pointSize=self.defaultFontSize))
             doc.modificationChanged[bool].connect(self.onModificationChanged)
             doc.setModified(False)
             self._cachedDocuments[script] = doc
         return self._cachedDocuments[script]
 
-    def commitChangesToLibrary(self, *args):
+    def commitChangesToLibrary(self, *_):
         index = self.selectedScriptIndex()
         if index is not None:
             self.libraryList[index].script = self.text.toPlainText()
@@ -633,16 +930,11 @@ class OWPythonScript(widget.OWWidget):
             self.libraryList[index].flags = Script.Modified if modified else 0
             self.libraryList.emitDataChanged(index)
 
-    def onSpliterMoved(self, pos, ind):
-        self.splitterState = bytes(self.splitCanvas.saveState())
-
-    def updateSelecetdScriptState(self):
+    def restoreSaved(self):
         index = self.selectedScriptIndex()
         if index is not None:
-            script = self.libraryList[index]
-            self.libraryList[index] = Script(script.name,
-                                             self.text.toPlainText(),
-                                             0)
+            self.text.document().setPlainText(self.libraryList[index].script)
+            self.text.document().setModified(False)
 
     def saveScript(self):
         index = self.selectedScriptIndex()
@@ -674,17 +966,14 @@ class OWPythonScript(widget.OWWidget):
         d = {}
         for name in self.signal_names:
             value = getattr(self, name)
-            all_values = list(value.values())
+            all_values = list(value)
             one_value = all_values[0] if len(all_values) == 1 else None
             d["in_" + name + "s"] = all_values
             d["in_" + name] = one_value
         return d
 
     def commit(self):
-        if self.auto_execute:
-            self.execute_button.setEnabled(False)
         self.Error.clear()
-        self._script = str(self.text.toPlainText())
         lcls = self.initial_locals_state()
         lcls["_script"] = str(self.text.toPlainText())
         self.console.updateLocals(lcls)
@@ -701,6 +990,61 @@ class OWPythonScript(widget.OWWidget):
                 getattr(self.Error, signal)()
                 out_var = None
             getattr(self.Outputs, signal).send(out_var)
+
+    def keyPressEvent(self, e):
+        if e.matches(QKeySequence.InsertLineSeparator):
+            # run on Shift+Enter, Ctrl+Enter
+            self.run_action.trigger()
+            e.accept()
+        else:
+            super().keyPressEvent(e)
+
+    def dragEnterEvent(self, event):  # pylint: disable=no-self-use
+        urls = event.mimeData().urls()
+        if urls:
+            # try reading the file as text
+            c = read_file_content(urls[0].toLocalFile(), limit=1000)
+            if c is not None:
+                event.acceptProposedAction()
+
+    @classmethod
+    def migrate_settings(cls, settings, version):
+        if version is not None and version < 2:
+            scripts = settings.pop("libraryListSource")  # type: List[Script]
+            library = [dict(name=s.name, script=s.script, filename=s.filename)
+                       for s in scripts]  # type: List[_ScriptData]
+            settings["scriptLibrary"] = library
+
+    def onDeleteWidget(self):
+        self.text.terminate()
+        super().onDeleteWidget()
+
+
+class OWPythonScriptDropHandler(SingleFileDropHandler):
+    WIDGET = OWPythonScript
+
+    def canDropFile(self, path: str) -> bool:
+        md = QMimeDatabase()
+        mt = md.mimeTypeForFile(path)
+        return mt.inherits("text/x-python")
+
+    def parametersFromFile(self, path: str) -> Dict[str, Any]:
+        with open(path, "rt") as f:
+            content = f.read()
+
+        item: '_ScriptData' = {
+            "name": os.path.basename(path),
+            "script": content,
+            "filename": path,
+        }
+        params = {
+            "__version__": OWPythonScript.settings_version,
+            "scriptLibrary": [
+                item,
+            ],
+            "scriptText": content
+        }
+        return params
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -2,38 +2,42 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 
-from AnyQt.QtCore import QSize
+from AnyQt.QtCore import QSize, Signal, Qt
 from AnyQt.QtWidgets import QApplication
+
+from orangewidget.utils.visual_settings_dlg import VisualSettingsDialog
 
 from Orange.data import (
     Table, ContinuousVariable, Domain, Variable, StringVariable
 )
 from Orange.data.util import get_unique_names, array_equal
 from Orange.data.sql.table import SqlTable
-from Orange.preprocess.preprocess import Preprocess, ApplyDomain
 from Orange.statistics.util import bincount
 
 from Orange.widgets import gui, report
 from Orange.widgets.settings import (
     Setting, ContextSetting, DomainContextHandler, SettingProvider
 )
+from Orange.widgets.utils import colorpalettes
 from Orange.widgets.utils.annotated_data import (
     create_annotated_table, ANNOTATED_DATA_SIGNAL_NAME, create_groups_table
 )
-from Orange.widgets.utils.colorpalette import (
-    ColorPaletteGenerator, ContinuousPaletteGenerator, DefaultRGBColors
-)
 from Orange.widgets.utils.plot import OWPlotGUI
 from Orange.widgets.utils.sql import check_sql_input
-from Orange.widgets.visualize.owscatterplotgraph import OWScatterPlotBase
+from Orange.widgets.visualize.owscatterplotgraph import (
+    OWScatterPlotBase, MAX_COLORS
+)
 from Orange.widgets.visualize.utils.component import OWGraphWithAnchors
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 
-MAX_CATEGORIES = 11  # maximum number of colors or shapes (including Other)
+
+# maximum number of shapes (including Other)
+MAX_SHAPES = len(OWScatterPlotBase.CurveSymbols) - 1
+
 MAX_POINTS_IN_TOOLTIP = 5
 
 
-class OWProjectionWidgetBase(OWWidget):
+class OWProjectionWidgetBase(OWWidget, openclass=True):
     """
     Base widget for widgets that use attribute data to set the colors, labels,
     shapes and sizes of points.
@@ -100,7 +104,7 @@ class OWProjectionWidgetBase(OWWidget):
         return None
 
     def get_column(self, attr, filter_valid=True,
-                   merge_infrequent=False, return_labels=False):
+                   max_categories=None, return_labels=False):
         """
         Retrieve the data from the given column in the data table
 
@@ -110,10 +114,10 @@ class OWProjectionWidgetBase(OWWidget):
           actually primitive,
         - filters out invalid data (if `filter_valid` is `True`),
         - merges infrequent (discrete) values into a single value
-          (if `merge_infrequent` is `True`).
+          (if `max_categories` is set).
 
         Tha latter feature is used for shapes and labels, where only a
-        set number (`MAX`) of different values is shown, and others are
+        specified number of different values is shown, and others are
         merged into category 'Other'. In this case, the method may return
         either the data (e.g. color indices, shape indices) or the list
         of retained values, followed by `['Other']`.
@@ -121,7 +125,7 @@ class OWProjectionWidgetBase(OWWidget):
         Args:
             attr (:obj:~Orange.data.Variable): the column to extract
             filter_valid (bool): filter out invalid data (default: `True`)
-            merge_infrequent (bool): merge infrequent values (default: `False`);
+            max_categories (int): merge infrequent values (default: `None`);
                 ignored for non-discrete attributes
             return_labels (bool): return a list of labels instead of data
                 (default: `False`)
@@ -132,9 +136,9 @@ class OWProjectionWidgetBase(OWWidget):
         if attr is None:
             return None
 
-        needs_merging = \
-            attr.is_discrete \
-            and merge_infrequent and len(attr.values) >= MAX_CATEGORIES
+        needs_merging = attr.is_discrete \
+                        and max_categories is not None \
+                        and len(attr.values) >= max_categories
         if return_labels and not needs_merging:
             assert attr.is_discrete
             return attr.values
@@ -149,7 +153,7 @@ class OWProjectionWidgetBase(OWWidget):
 
         dist = bincount(all_data, max_val=len(attr.values) - 1)[0]
         infrequent = np.zeros(len(attr.values), dtype=bool)
-        infrequent[np.argsort(dist)[:-(MAX_CATEGORIES-1)]] = True
+        infrequent[np.argsort(dist)[:-(max_categories-1)]] = True
         if return_labels:
             return [value for value, infreq in zip(attr.values, infrequent)
                     if not infreq] + ["Other"]
@@ -158,7 +162,7 @@ class OWProjectionWidgetBase(OWWidget):
             freq_vals = [i for i, f in enumerate(infrequent) if not f]
             for i, infreq in enumerate(infrequent):
                 if infreq:
-                    result[all_data == i] = MAX_CATEGORIES - 1
+                    result[all_data == i] = max_categories - 1
                 else:
                     result[all_data == i] = freq_vals.index(i)
             return result
@@ -188,7 +192,7 @@ class OWProjectionWidgetBase(OWWidget):
     # Colors
     def get_color_data(self):
         """Return the column corresponding to color data"""
-        return self.get_column(self.attr_color, merge_infrequent=True)
+        return self.get_column(self.attr_color, max_categories=MAX_COLORS)
 
     def get_color_labels(self):
         """
@@ -197,7 +201,11 @@ class OWProjectionWidgetBase(OWWidget):
         Returns:
             (list of str): labels
         """
-        return self.get_column(self.attr_color, merge_infrequent=True,
+        if self.attr_color is None:
+            return None
+        if not self.attr_color.is_discrete:
+            return self.attr_color.str_val
+        return self.get_column(self.attr_color, max_categories=MAX_COLORS,
                                return_labels=True)
 
     def is_continuous_color(self):
@@ -216,16 +224,17 @@ class OWProjectionWidgetBase(OWWidget):
         This method must be overridden if the widget offers coloring that is
         not based on attribute values.
         """
-        if self.attr_color is None:
+        attr = self.attr_color
+        if not attr:
             return None
-        colors = self.attr_color.colors
-        if self.attr_color.is_discrete:
-            return ColorPaletteGenerator(
-                number_of_colors=min(len(colors), MAX_CATEGORIES),
-                rgb_colors=colors if len(colors) <= MAX_CATEGORIES
-                else DefaultRGBColors)
-        else:
-            return ContinuousPaletteGenerator(*colors)
+        palette = attr.palette
+        if attr.is_discrete and len(attr.values) >= MAX_COLORS:
+            values = self.get_color_labels()
+            colors = [palette.palette[attr.to_val(value)]
+                      for value in values[:-1]] + [[192, 192, 192]]
+
+            palette = colorpalettes.DiscretePalette.from_colors(colors)
+        return palette
 
     def can_draw_density(self):
         """
@@ -240,6 +249,7 @@ class OWProjectionWidgetBase(OWWidget):
 
     def colors_changed(self):
         self.graph.update_colors()
+        self._update_opacity_warning()
         self.cb_class_density.setEnabled(self.can_draw_density())
 
     # Labels
@@ -263,10 +273,10 @@ class OWProjectionWidgetBase(OWWidget):
         Returns:
             (list of str): labels
         """
-        return self.get_column(self.attr_shape, merge_infrequent=True)
+        return self.get_column(self.attr_shape, max_categories=MAX_SHAPES)
 
     def get_shape_labels(self):
-        return self.get_column(self.attr_shape, merge_infrequent=True,
+        return self.get_column(self.attr_shape, max_categories=MAX_SHAPES,
                                return_labels=True)
 
     def impute_shapes(self, shape_data, default_symbol):
@@ -343,7 +353,7 @@ class OWProjectionWidgetBase(OWWidget):
         self.graph.update_tooltip(event.modifiers())
 
 
-class OWDataProjectionWidget(OWProjectionWidgetBase):
+class OWDataProjectionWidget(OWProjectionWidgetBase, openclass=True):
     """
     Base widget for widgets that get Data and Data Subset (both
     Orange.data.Table) on the input, and output Selected Data and Data
@@ -367,16 +377,23 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
             "Subset data contains some instances that do not appear in "
             "input data")
         subset_independent = Msg(
-            "None of subset data instance appear in input data")
+            "No subset data instances appear in input data")
+        transparent_subset = Msg(
+            "Increase opacity if subset is difficult to see")
 
     settingsHandler = DomainContextHandler()
     selection = Setting(None, schema_only=True)
+    visual_settings = Setting({}, schema_only=True)
     auto_commit = Setting(True)
 
     GRAPH_CLASS = OWScatterPlotBase
     graph = SettingProvider(OWScatterPlotBase)
     graph_name = "graph.plot_widget.plotItem"
     embedding_variables_names = ("proj-x", "proj-y")
+    buttons_area_orientation = Qt.Vertical
+
+    input_changed = Signal(object)
+    output_changed = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -384,12 +401,17 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
         self.subset_indices = None
         self.__pending_selection = self.selection
         self._invalidated = True
+        self._domain_invalidated = True
         self.setup_gui()
+        VisualSettingsDialog(self, self.graph.parameter_setter.initial_settings)
 
     # GUI
     def setup_gui(self):
         self._add_graph()
         self._add_controls()
+        self._add_buttons()
+        self.input_changed.emit(None)
+        self.output_changed.emit(None)
 
     def _add_graph(self):
         box = gui.vBox(self.mainArea, True, margin=0)
@@ -404,11 +426,11 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
         self._point_box = self.gui.point_properties_box(area)
         self._effects_box = self.gui.effects_box(area)
         self._plot_box = self.gui.plot_properties_box(area)
-        self.control_area_stretch = gui.widgetBox(area)
-        self.control_area_stretch.layout().addStretch(100)
-        self.gui.box_zoom_select(area)
-        gui.auto_commit(
-            area, self, "auto_commit", "Send Selection", "Send Automatically")
+
+    def _add_buttons(self):
+        gui.rubber(self.controlArea)
+        self.gui.box_zoom_select(self.buttonsArea)
+        gui.auto_send(self.buttonsArea, self, "auto_commit")
 
     @property
     def effective_variables(self):
@@ -426,28 +448,25 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
     def set_data(self, data):
         data_existed = self.data is not None
         effective_data = self.effective_data if data_existed else None
-        same_domain = (data_existed and data is not None and
-                       data.domain.checksum() == self.data.domain.checksum())
         self.closeContext()
         self.data = data
         self.check_data()
-        if not same_domain:
-            self.init_attr_values()
+        self.init_attr_values()
         self.openContext(self.data)
-        self.use_context()
         self._invalidated = not (
             data_existed and self.data is not None and
             array_equal(effective_data.X, self.effective_data.X))
+        self._domain_invalidated = not (
+            data_existed and self.data is not None and
+            effective_data.domain.checksum()
+            == self.effective_data.domain.checksum())
         if self._invalidated:
             self.clear()
+            self.input_changed.emit(data)
         self.enable_controls()
 
     def check_data(self):
-        self.valid_data = None
         self.clear_messages()
-
-    def use_context(self):
-        pass
 
     def enable_controls(self):
         self.cb_class_density.setEnabled(self.can_draw_density())
@@ -456,32 +475,40 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
     @check_sql_input
     def set_subset_data(self, subset):
         self.subset_data = subset
-        self.subset_indices = {e.id for e in subset} \
-            if subset is not None else {}
-        self.controls.graph.alpha_value.setEnabled(subset is None)
 
     def handleNewSignals(self):
+        self._handle_subset_data()
         if self._invalidated:
             self._invalidated = False
             self.setup_plot()
         else:
             self.graph.update_point_props()
-        self.commit()
+        self._update_opacity_warning()
+        self.commit.now()
 
-    def get_subset_mask(self):
+    def _handle_subset_data(self):
         self.Warning.subset_independent.clear()
         self.Warning.subset_not_subset.clear()
+        if self.data is None or self.subset_data is None:
+            self.subset_indices = set()
+        else:
+            self.subset_indices = set(self.subset_data.ids)
+            ids = set(self.data.ids)
+            if not self.subset_indices & ids:
+                self.Warning.subset_independent()
+            elif self.subset_indices - ids:
+                self.Warning.subset_not_subset()
+
+    def _update_opacity_warning(self):
+        self.Warning.transparent_subset(
+            shown=self.subset_indices and self.graph.alpha_value < 128)
+
+    def get_subset_mask(self):
         if not self.subset_indices:
             return None
         valid_data = self.data[self.valid_data]
-        mask = np.fromiter((ex.id in self.subset_indices for ex in valid_data),
-                           dtype=np.bool, count=len(valid_data))
-        in_mask = mask.sum()
-        if not in_mask:
-            self.Warning.subset_independent()
-        elif in_mask < len(self.subset_indices):
-            self.Warning.subset_not_subset()
-        return mask
+        return np.fromiter((ex.id in self.subset_indices for ex in valid_data),
+                           dtype=bool, count=len(valid_data))
 
     # Plot
     def get_embedding(self):
@@ -523,15 +550,18 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
             self.__pending_selection = None
             self.graph.selection = selection
             self.graph.update_selection_colors()
+            if self.graph.label_only_selected:
+                self.graph.update_labels()
 
     def selection_changed(self):
         sel = None if self.data and isinstance(self.data, SqlTable) \
             else self.graph.selection
         self.selection = [(i, x) for i, x in enumerate(sel) if x] \
             if sel is not None else None
-        self.commit()
+        self.commit.deferred()
 
     # Output
+    @gui.deferred
     def commit(self):
         self.send_data()
 
@@ -540,10 +570,12 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
         if graph.selection is not None:
             group_sel = np.zeros(len(data), dtype=int)
             group_sel[self.valid_data] = graph.selection
-        self.Outputs.selected_data.send(
-            self._get_selected_data(data, graph.get_selection(), group_sel))
+        selected = self._get_selected_data(
+            data, graph.get_selection(), group_sel)
+        self.output_changed.emit(selected)
+        self.Outputs.selected_data.send(selected)
         self.Outputs.annotated_data.send(
-            self._get_annotated_data(data, graph.get_selection(), group_sel,
+            self._get_annotated_data(data, group_sel,
                                      graph.selection))
 
     def _get_projection_data(self):
@@ -553,7 +585,9 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
         data = self.data.transform(Domain(self.data.domain.attributes,
                                           self.data.domain.class_vars,
                                           self.data.domain.metas + variables))
-        data.metas[:, -2:] = self.get_embedding()
+        if data.metas.size:
+            with data.unlocked(data.metas):
+                data.metas[:, -2:] = self.get_embedding()
         return data
 
     def _get_projection_variables(self):
@@ -567,11 +601,17 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
             if len(selection) else None
 
     @staticmethod
-    def _get_annotated_data(data, selection, group_sel, graph_sel):
+    def _get_annotated_data(data, group_sel, graph_sel):
+        if data is None:
+            return None
         if graph_sel is not None and np.max(graph_sel) > 1:
             return create_groups_table(data, group_sel)
         else:
-            return create_annotated_table(data, selection)
+            if group_sel is None:
+                mask = np.full((len(data), ), False)
+            else:
+                mask = np.nonzero(group_sel)[0]
+            return create_annotated_table(data, mask)
 
     # Report
     def send_report(self):
@@ -592,6 +632,11 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
             ("Jittering", self.graph.jitter_size != 0 and
              "{} %".format(self.graph.jitter_size))))
 
+    # Customize plot
+    def set_visual_settings(self, key, value):
+        self.graph.parameter_setter.set_parameter(key, value)
+        self.visual_settings[key] = value
+
     @staticmethod
     def _get_caption_var_name(var):
         return var.name if isinstance(var, Variable) else var
@@ -611,7 +656,7 @@ class OWDataProjectionWidget(OWProjectionWidgetBase):
         self.graph.clear()
 
 
-class OWAnchorProjectionWidget(OWDataProjectionWidget):
+class OWAnchorProjectionWidget(OWDataProjectionWidget, openclass=True):
     """ Base widget for widgets with graphs with anchors. """
     SAMPLE_SIZE = 100
 
@@ -620,7 +665,6 @@ class OWAnchorProjectionWidget(OWDataProjectionWidget):
 
     class Outputs(OWDataProjectionWidget.Outputs):
         components = Output("Components", Table)
-        preprocessor = Output("Preprocessor", Preprocess)
 
     class Error(OWDataProjectionWidget.Error):
         sparse_data = Msg("Sparse data is not supported")
@@ -629,8 +673,8 @@ class OWAnchorProjectionWidget(OWDataProjectionWidget):
         proj_error = Msg("An error occurred while projecting data.\n{}")
 
     def __init__(self):
-        super().__init__()
         self.projector = self.projection = None
+        super().__init__()
         self.graph.view_box.started.connect(self._manual_move_start)
         self.graph.view_box.moved.connect(self._manual_move)
         self.graph.view_box.finished.connect(self._manual_move_finish)
@@ -647,8 +691,7 @@ class OWAnchorProjectionWidget(OWDataProjectionWidget):
             elif len(self.data) < 2:
                 error(self.Error.no_instances)
             else:
-                self.valid_data = np.all(np.isfinite(self.data.X), axis=1)
-                if not np.sum(self.valid_data):
+                if not np.sum(np.all(np.isfinite(self.data.X), axis=1)):
                     error(self.Error.no_valid_data)
 
     def init_projection(self):
@@ -661,6 +704,7 @@ class OWAnchorProjectionWidget(OWDataProjectionWidget):
             self.Error.proj_error(ex)
 
     def get_embedding(self):
+        self.valid_data = None
         if self.data is None or self.projection is None:
             return None
         embedding = self.projection(self.data).X
@@ -685,27 +729,37 @@ class OWAnchorProjectionWidget(OWDataProjectionWidget):
     def _manual_move_finish(self, anchor_idx, x, y):
         self._manual_move(anchor_idx, x, y)
         self.graph.set_sample_size(None)
-        self.commit()
+        self.commit.deferred()
 
     def _get_projection_data(self):
         if self.data is None or self.projection is None:
             return None
+        proposed = [a.name for a in self.projection.domain.attributes]
+        names = get_unique_names(self.data.domain, proposed)
+
+        if proposed != names:
+            attributes = tuple([attr.copy(name=name) for name, attr in
+                                zip(names, self.projection.domain.attributes)])
+        else:
+            attributes = self.projection.domain.attributes
         return self.data.transform(
             Domain(self.data.domain.attributes,
                    self.data.domain.class_vars,
-                   self.data.domain.metas + self.projection.domain.attributes))
+                   self.data.domain.metas + attributes))
 
+    @gui.deferred
     def commit(self):
         super().commit()
         self.send_components()
-        self.send_preprocessor()
 
     def send_components(self):
         components = None
         if self.data is not None and self.projection is not None:
-            meta_attrs = [StringVariable(name='component')]
+            proposed = [var.name for var in self.effective_variables]
+            comp_name = get_unique_names(proposed, 'component')
+            meta_attrs = [StringVariable(name=comp_name)]
             domain = Domain(self.effective_variables, metas=meta_attrs)
-            components = Table(domain, self._send_components_x(),
+            components = Table(domain, self._send_components_x().copy(),
                                metas=self._send_components_metas())
             components.name = "components"
         self.Outputs.components.send(components)
@@ -716,12 +770,6 @@ class OWAnchorProjectionWidget(OWDataProjectionWidget):
     def _send_components_metas(self):
         variable_names = [a.name for a in self.projection.domain.attributes]
         return np.array(variable_names, dtype=object)[:, None]
-
-    def send_preprocessor(self):
-        prep = None
-        if self.data is not None and self.projection is not None:
-            prep = ApplyDomain(self.projection.domain, self.projection.name)
-        self.Outputs.preprocessor.send(prep)
 
     def clear(self):
         super().clear()
@@ -749,5 +797,5 @@ if __name__ == "__main__":
     ow.set_subset_data(table[::10])
     ow.handleNewSignals()
     ow.show()
-    app.exec_()
+    app.exec()
     ow.saveSettings()

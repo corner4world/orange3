@@ -1,24 +1,24 @@
 import enum
 from collections import OrderedDict
-from itertools import chain
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 
 from AnyQt.QtWidgets import (
     QWidget, QTableWidget, QHeaderView, QComboBox, QLineEdit, QToolButton,
     QMessageBox, QMenu, QListView, QGridLayout, QPushButton, QSizePolicy,
-    QLabel)
-from AnyQt.QtGui import (
-    QDoubleValidator, QRegExpValidator, QStandardItemModel, QStandardItem,
-    QFontMetrics, QPalette
-)
-from AnyQt.QtCore import Qt, QPoint, QRegExp, QPersistentModelIndex, QLocale
+    QLabel, QHBoxLayout, QDateTimeEdit)
+from AnyQt.QtGui import (QDoubleValidator, QStandardItemModel, QStandardItem,
+                         QFontMetrics, QPalette)
+from AnyQt.QtCore import Qt, QPoint, QPersistentModelIndex, QLocale, \
+    QDateTime, QDate, QTime
 
-from Orange.data import (ContinuousVariable, DiscreteVariable, StringVariable,
-                         Table, TimeVariable)
+from orangewidget.utils.combobox import ComboBoxSearch
+from Orange.widgets.utils.itemmodels import DomainModel
+from Orange.data import (
+    ContinuousVariable, DiscreteVariable, StringVariable, TimeVariable, Table)
 import Orange.data.filter as data_filter
 from Orange.data.filter import FilterContinuous, FilterString
-from Orange.data.domain import filter_visible
 from Orange.data.sql.table import SqlTable
 from Orange.preprocess import Remove
 from Orange.widgets import widget, gui
@@ -35,47 +35,128 @@ from Orange.widgets.utils.annotated_data import (create_annotated_table,
 class SelectRowsContextHandler(DomainContextHandler):
     """Context handler that filters conditions"""
 
+    # pylint: disable=arguments-differ
     def is_valid_item(self, setting, condition, attrs, metas):
         """Return True if condition applies to a variable in given domain."""
         varname, *_ = condition
         return varname in attrs or varname in metas
 
     def encode_setting(self, context, setting, value):
-        if setting.name == 'conditions':
-            CONTINUOUS = vartype(ContinuousVariable())
-            for i, (attr, op, values) in enumerate(value):
-                if context.attributes.get(attr) == CONTINUOUS:
-                    if values and isinstance(values[0], str):
-                        values = [QLocale().toDouble(v)[0] for v in values]
-                        value[i] = (attr, op, values)
-        return super().encode_setting(context, setting, value)
+        if setting.name != 'conditions':
+            return super().encode_settings(context, setting, value)
 
-    def decode_setting(self, setting, value, domain=None):
+        encoded = []
+        CONTINUOUS = vartype(ContinuousVariable("x"))
+        for attr, op, values in value:
+            if isinstance(attr, str):
+                if OWSelectRows.AllTypes.get(attr) == CONTINUOUS:
+                    values = [QLocale().toDouble(v)[0] for v in values]
+                # None will match the value returned by all_vars.get
+                encoded.append((attr, None, op, values))
+            else:
+                # check for exact match, pylint: disable=unidiomatic-typecheck
+                if type(attr) is ContinuousVariable \
+                        and values and isinstance(values[0], str):
+                    values = [QLocale().toDouble(v)[0] for v in values]
+                elif isinstance(attr, DiscreteVariable):
+                    values = [attr.values[i - 1] if i else "" for i in values]
+                encoded.append((
+                    attr.name,
+                    context.attributes.get(attr.name)
+                    or context.metas.get(attr.name),
+                    op,
+                    values
+                ))
+        return encoded
+
+    # pylint: disable=arguments-differ
+    def decode_setting(self, setting, value, domain=None, *_args):
         value = super().decode_setting(setting, value, domain)
         if setting.name == 'conditions':
-            for i, (attr, op, values) in enumerate(value):
-                var = attr in domain and domain[attr]
-                if var and var.is_continuous and not isinstance(var, TimeVariable):
-                    value[i] = (attr, op,
-                                list([QLocale().toString(float(i), 'f')
-                                      for i in values]))
+            CONTINUOUS = vartype(ContinuousVariable("x"))
+            # Use this after 2022/2/2:
+            # for i, (attr, tpe, op, values) in enumerate(value):
+            #     if tpe is not None:
+            for i, (attr, *tpe, op, values) in enumerate(value):
+                if tpe != [None] \
+                        or not tpe and attr not in OWSelectRows.AllTypes:
+                    attr = domain[attr]
+                # check for exact match, pylint: disable=unidiomatic-typecheck
+                if type(attr) is ContinuousVariable \
+                        or OWSelectRows.AllTypes.get(attr) == CONTINUOUS:
+                    values = [QLocale().toString(float(i), 'f') for i in values]
+                elif isinstance(attr, DiscreteVariable):
+                    # After 2022/2/2, use just the expression in else clause
+                    if values and isinstance(values[0], int):
+                        # Backwards compatibility. Reset setting if we detect
+                        # that the number of values decreased. Still broken if
+                        # they're reordered or we don't detect the decrease.
+                        #
+                        # indices start with 1, thus >, not >=
+                        if max(values) > len(attr.values):
+                            values = (0, )
+                    else:
+                        values = tuple(attr.to_val(val) + 1 if val else 0
+                                       for val in values if val in attr.values) \
+                                 or (0, )
+                value[i] = (attr, op, values)
         return value
+
+    def match(self, context, domain, attrs, metas):
+        if (attrs, metas) == (context.attributes, context.metas):
+            return self.PERFECT_MATCH
+
+        conditions = context.values["conditions"]
+        all_vars = attrs.copy()
+        all_vars.update(metas)
+        matched = [all_vars.get(name) == tpe  # also matches "all (...)" strings
+                   # After 2022/2/2 remove this line:
+                   if len(rest) == 2 else name in all_vars
+                   for name, tpe, *rest in conditions]
+        if any(matched):
+            return 0.5 * sum(matched) / len(matched)
+        return self.NO_MATCH
+
+    def filter_value(self, setting, data, domain, attrs, metas):
+        if setting.name != "conditions":
+            super().filter_value(setting, data, domain, attrs, metas)
+            return
+
+        all_vars = attrs.copy()
+        all_vars.update(metas)
+        conditions = data["conditions"]
+        # Use this after 2022/2/2: if any(all_vars.get(name) == tpe:
+        # conditions[:] = [(name, tpe, *rest) for name, tpe, *rest in conditions
+        #                  if all_vars.get(name) == tpe]
+        conditions[:] = [
+            (name, tpe, *rest) for name, tpe, *rest in conditions
+            # all_vars.get(name) == tpe also matches "all (...)" which are
+            # encoded with type `None`
+            if (all_vars.get(name) == tpe if len(rest) == 2
+                else name in all_vars)]
 
 
 class FilterDiscreteType(enum.Enum):
+    # pylint: disable=invalid-name
     Equal = "Equal"
     NotEqual = "NotEqual"
     In = "In"
     IsDefined = "IsDefined"
 
 
+def _plural(s):
+    s = s.replace("is ", "are ")
+    for word in ("equals", "contains", "begins", "ends"):
+        s = s.replace(word, word[:-1])
+    return s
+
+
 class OWSelectRows(widget.OWWidget):
     name = "Select Rows"
-    id = "Orange.widgets.data.file"
     description = "Select rows from the data based on values of variables."
     icon = "icons/SelectRows.svg"
     priority = 100
-    category = "Data"
+    category = "Transform"
     keywords = ["filter"]
 
     class Inputs:
@@ -94,6 +175,8 @@ class OWSelectRows(widget.OWWidget):
     purge_attributes = Setting(False, schema_only=True)
     purge_classes = Setting(False, schema_only=True)
     auto_commit = Setting(True)
+
+    settings_version = 2
 
     Operators = {
         ContinuousVariable: [
@@ -128,7 +211,19 @@ class OWSelectRows(widget.OWWidget):
             (FilterString.IsDefined, "is defined"),
         ]
     }
+
     Operators[TimeVariable] = Operators[ContinuousVariable]
+
+    AllTypes = {}
+    for _all_name, _all_type, _all_ops in (
+            ("All variables", 0,
+             [(None, "are defined")]),
+            ("All numeric variables", 2,
+             [(v, _plural(t)) for v, t in Operators[ContinuousVariable]]),
+            ("All string variables", 3,
+             [(v, _plural(t)) for v, t in Operators[StringVariable]])):
+        Operators[_all_name] = _all_ops
+        AllTypes[_all_name] = _all_type
 
     operator_names = {vtype: [name for _, name in filters]
                       for vtype, filters in Operators.items()}
@@ -145,6 +240,9 @@ class OWSelectRows(widget.OWWidget):
         self.last_output_conditions = None
         self.data = None
         self.data_desc = self.match_desc = self.nonmatch_desc = None
+        self.variable_model = DomainModel(
+            [list(self.AllTypes), DomainModel.Separator,
+             DomainModel.CLASSES, DomainModel.ATTRIBUTES, DomainModel.METAS])
 
         box = gui.vBox(self.controlArea, 'Conditions', stretch=100)
         self.cond_list = QTableWidget(
@@ -169,34 +267,18 @@ class OWSelectRows(widget.OWWidget):
             box2, self, "Remove All", callback=self.remove_all)
         gui.rubber(box2)
 
-        boxes = gui.widgetBox(self.controlArea, orientation=QGridLayout())
-        layout = boxes.layout()
-        layout.setColumnStretch(0, 1)
-        layout.setColumnStretch(1, 1)
-
-        box_data = gui.vBox(boxes, 'Data', addToLayout=False)
-        self.data_in_variables = gui.widgetLabel(box_data, " ")
-        self.data_out_rows = gui.widgetLabel(box_data, " ")
-        layout.addWidget(box_data, 0, 0)
-
-        box_setting = gui.vBox(boxes, 'Purging', addToLayout=False)
+        box_setting = gui.vBox(self.buttonsArea)
         self.cb_pa = gui.checkBox(
             box_setting, self, "purge_attributes", "Remove unused features",
             callback=self.conditions_changed)
-        gui.separator(box_setting, height=1)
         self.cb_pc = gui.checkBox(
             box_setting, self, "purge_classes", "Remove unused classes",
             callback=self.conditions_changed)
-        layout.addWidget(box_setting, 0, 1)
 
         self.report_button.setFixedWidth(120)
         gui.rubber(self.buttonsArea.layout())
-        layout.addWidget(self.buttonsArea, 1, 0)
 
-        acbox = gui.auto_commit(
-            None, self, "auto_commit", label="Send", orientation=Qt.Horizontal,
-            checkbox_label="Send automatically")
-        layout.addWidget(acbox, 1, 1)
+        gui.auto_send(self.buttonsArea, self, "auto_commit")
 
         self.set_data(None)
         self.resize(600, 400)
@@ -206,13 +288,13 @@ class OWSelectRows(widget.OWWidget):
         row = model.rowCount()
         model.insertRow(row)
 
-        attr_combo = gui.OrangeComboBox(
+        attr_combo = ComboBoxSearch(
             minimumContentsLength=12,
             sizeAdjustPolicy=QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        attr_combo.setModel(self.variable_model)
         attr_combo.row = row
-        for var in self._visible_variables(self.data.domain):
-            attr_combo.addItem(*gui.attributeItem(var))
-        attr_combo.setCurrentIndex(attr or 0)
+        attr_combo.setCurrentIndex(self.variable_model.indexOf(attr) if attr
+                                   else len(self.AllTypes) + 1)
         self.cond_list.setCellWidget(row, 0, attr_combo)
 
         index = QPersistentModelIndex(model.index(row, 3))
@@ -230,13 +312,6 @@ class OWSelectRows(widget.OWWidget):
 
         self.cond_list.resizeRowToContents(row)
 
-    @staticmethod
-    def _visible_variables(domain):
-        """Generate variables in order they should be presented in in combos."""
-        return filter_visible(chain(domain.class_vars,
-                                    domain.metas,
-                                    domain.attributes))
-
     def add_all(self):
         if self.cond_list.rowCount():
             Mb = QMessageBox
@@ -246,9 +321,9 @@ class OWSelectRows(widget.OWWidget):
                     "filters for all variables.", Mb.Ok | Mb.Cancel) != Mb.Ok:
                 return
             self.remove_all()
-        domain = self.data.domain
-        for i in range(len(domain.variables) + len(domain.metas)):
-            self.add_row(i)
+        for attr in self.variable_model[len(self.AllTypes) + 1:]:
+            self.add_row(attr)
+        self.conditions_changed()
 
     def remove_one(self, rownum):
         self.remove_one_row(rownum)
@@ -264,18 +339,34 @@ class OWSelectRows(widget.OWWidget):
             self.remove_all_button.setDisabled(True)
 
     def remove_all_rows(self):
+        # Disconnect signals to avoid stray emits when changing variable_model
+        for row in range(self.cond_list.rowCount()):
+            for col in (0, 1):
+                widg = self.cond_list.cellWidget(row, col)
+                if widg:
+                    widg.currentIndexChanged.disconnect()
         self.cond_list.clear()
         self.cond_list.setRowCount(0)
         self.remove_all_button.setDisabled(True)
 
     def set_new_operators(self, attr_combo, adding_all,
                           selected_index=None, selected_values=None):
+        old_combo = self.cond_list.cellWidget(attr_combo.row, 1)
+        prev_text = old_combo.currentText() if old_combo else ""
         oper_combo = QComboBox()
         oper_combo.row = attr_combo.row
         oper_combo.attr_combo = attr_combo
-        var = self.data.domain[attr_combo.currentText()]
-        oper_combo.addItems(self.operator_names[type(var)])
-        oper_combo.setCurrentIndex(selected_index or 0)
+        attr_name = attr_combo.currentText()
+        if attr_name in self.AllTypes:
+            oper_combo.addItems(self.operator_names[attr_name])
+        else:
+            var = self.data.domain[attr_name]
+            oper_combo.addItems(self.operator_names[type(var)])
+        if selected_index is None:
+            selected_index = oper_combo.findText(prev_text)
+            if selected_index == -1:
+                selected_index = 0
+        oper_combo.setCurrentIndex(selected_index)
         self.cond_list.setCellWidget(oper_combo.row, 1, oper_combo)
         self.set_new_values(oper_combo, adding_all, selected_values)
         oper_combo.currentIndexChanged.connect(
@@ -283,8 +374,18 @@ class OWSelectRows(widget.OWWidget):
 
     @staticmethod
     def _get_lineedit_contents(box):
-        return [child.text() for child in getattr(box, "controls", [box])
-                if isinstance(child, QLineEdit)]
+        contents = []
+        for child in getattr(box, "controls", [box]):
+            if isinstance(child, QLineEdit):
+                contents.append(child.text())
+            elif isinstance(child, DateTimeWidget):
+                if child.format == (0, 1):
+                    contents.append(child.time())
+                elif child.format == (1, 0):
+                    contents.append(child.date())
+                elif child.format == (1, 1):
+                    contents.append(child.dateTime())
+        return contents
 
     @staticmethod
     def _get_value_contents(box):
@@ -305,6 +406,13 @@ class OWSelectRows(widget.OWWidget):
                             names.append(item.text())
                     child.desc_text = ', '.join(names)
                     child.set_text()
+            elif isinstance(child, DateTimeWidget):
+                if child.format == (0, 1):
+                    cont.append(child.time())
+                elif child.format == (1, 0):
+                    cont.append(child.date())
+                elif child.format == (1, 1):
+                    cont.append(child.dateTime())
             elif isinstance(child, QLabel) or child is None:
                 pass
             else:
@@ -340,36 +448,37 @@ class OWSelectRows(widget.OWWidget):
             le.setValidator(OWSelectRows.QDoubleValidatorEmpty())
             return le
 
-        def add_datetime(contents):
-            le = add_textual(contents)
-            le.setValidator(QRegExpValidator(QRegExp(TimeVariable.REGEX)))
-            return le
-
-        var = self.data.domain[oper_combo.attr_combo.currentText()]
         box = self.cond_list.cellWidget(oper_combo.row, 2)
-        if selected_values is not None:
-            lc = list(selected_values) + ["", ""]
-            lc = [str(x) for x in lc[:2]]
-        else:
-            lc = ["", ""]
-        if box and vartype(var) == box.var_type:
-            lc = self._get_lineedit_contents(box) + lc
+        lc = ["", ""]
         oper = oper_combo.currentIndex()
+        attr_name = oper_combo.attr_combo.currentText()
+        if attr_name in self.AllTypes:
+            vtype = self.AllTypes[attr_name]
+            var = None
+        else:
+            var = self.data.domain[attr_name]
+            var_idx = self.data.domain.index(attr_name)
+            vtype = vartype(var)
+            if selected_values is not None:
+                lc = list(selected_values) + ["", ""]
+                lc = [str(x) if vtype != 4 else x for x in lc[:2]]
+        if box and vtype == box.var_type:
+            lc = self._get_lineedit_contents(box) + lc
 
-        if oper_combo.currentText() == "is defined":
+        if oper_combo.currentText().endswith(" defined"):
             label = QLabel()
-            label.var_type = vartype(var)
+            label.var_type = vtype
             self.cond_list.setCellWidget(oper_combo.row, 2, label)
-        elif var.is_discrete:
-            if oper_combo.currentText() == "is one of":
+        elif var is not None and var.is_discrete:
+            if oper_combo.currentText().endswith(" one of"):
                 if selected_values:
-                    lc = [x for x in list(selected_values)]
+                    lc = list(selected_values)
                 button = DropDownToolButton(self, var, lc)
-                button.var_type = vartype(var)
+                button.var_type = vtype
                 self.cond_list.setCellWidget(oper_combo.row, 2, button)
             else:
-                combo = QComboBox()
-                combo.addItems([""] + var.values)
+                combo = ComboBoxSearch()
+                combo.addItems(("", ) + var.values)
                 if lc[0]:
                     combo.setCurrentIndex(int(lc[0]))
                 else:
@@ -379,19 +488,50 @@ class OWSelectRows(widget.OWWidget):
                 combo.currentIndexChanged.connect(self.conditions_changed)
         else:
             box = gui.hBox(self, addToLayout=False)
-            box.var_type = vartype(var)
+            box.var_type = vtype
             self.cond_list.setCellWidget(oper_combo.row, 2, box)
-            if var.is_continuous:
-                validator = add_datetime if isinstance(var, TimeVariable) else add_numeric
-                box.controls = [validator(lc[0])]
+            if vtype == 2:  # continuous:
+                box.controls = [add_numeric(lc[0])]
                 if oper > 5:
                     gui.widgetLabel(box, " and ")
-                    box.controls.append(validator(lc[1]))
-            elif var.is_string:
+                    box.controls.append(add_numeric(lc[1]))
+            elif vtype == 3:  # string:
                 box.controls = [add_textual(lc[0])]
                 if oper in [6, 7]:
                     gui.widgetLabel(box, " and ")
                     box.controls.append(add_textual(lc[1]))
+            elif vtype == 4:  # time:
+                def invalidate_datetime():
+                    if w_:
+                        if w.dateTime() > w_.dateTime():
+                            w_.setDateTime(w.dateTime())
+                        if w.format == (1, 1):
+                            w.calendarWidget.timeedit.setTime(w.time())
+                            w_.calendarWidget.timeedit.setTime(w_.time())
+                    elif w.format == (1, 1):
+                        w.calendarWidget.timeedit.setTime(w.time())
+
+                def datetime_changed():
+                    self.conditions_changed()
+                    invalidate_datetime()
+
+                datetime_format = (var.have_date, var.have_time)
+                column = self.data.get_column_view(var_idx)[0]
+                w = DateTimeWidget(self, column, datetime_format)
+                w.set_datetime(lc[0])
+                box.controls = [w]
+                box.layout().addWidget(w)
+                w.dateTimeChanged.connect(datetime_changed)
+                if oper > 5:
+                    gui.widgetLabel(box, " and ")
+                    w_ = DateTimeWidget(self, column, datetime_format)
+                    w_.set_datetime(lc[1])
+                    box.layout().addWidget(w_)
+                    box.controls.append(w_)
+                    invalidate_datetime()
+                    w_.dateTimeChanged.connect(datetime_changed)
+                else:
+                    w_ = None
             else:
                 box.controls = []
         if not adding_all:
@@ -410,50 +550,50 @@ class OWSelectRows(widget.OWWidget):
             len(data.domain.variables) + len(data.domain.metas) > 100)
         if not data:
             self.data_desc = None
-            self.commit()
+            self.variable_model.set_domain(None)
+            self.commit.deferred()
             return
         self.data_desc = report.describe_data_brief(data)
-        self.conditions = []
-        try:
-            self.openContext(data)
-        except Exception:
-            pass
+        self.variable_model.set_domain(data.domain)
 
-        variables = list(self._visible_variables(self.data.domain))
-        varnames = [v.name for v in variables]
-        if self.conditions:
-            for attr, cond_type, cond_value in self.conditions:
-                if attr in varnames:
-                    self.add_row(varnames.index(attr), cond_type, cond_value)
-        elif variables:
+        self.conditions = []
+        self.openContext(data)
+        for attr, cond_type, cond_value in self.conditions:
+            if attr in self.variable_model:
+                self.add_row(attr, cond_type, cond_value)
+        if not self.cond_list.model().rowCount():
             self.add_row()
 
-        self.update_info(data, self.data_in_variables, "In: ")
-        self.unconditional_commit()
+        self.commit.now()
 
     def conditions_changed(self):
         try:
-            self.conditions = []
+            cells_by_rows = (
+                [self.cond_list.cellWidget(row, col) for col in range(3)]
+                for row in range(self.cond_list.rowCount())
+            )
             self.conditions = [
-                (self.cond_list.cellWidget(row, 0).currentText(),
-                 self.cond_list.cellWidget(row, 1).currentIndex(),
-                 self._get_value_contents(self.cond_list.cellWidget(row, 2)))
-                for row in range(self.cond_list.rowCount())]
+                (var_cell.currentData(gui.TableVariable) or var_cell.currentText(),
+                 oper_cell.currentIndex(),
+                 self._get_value_contents(val_cell))
+                for var_cell, oper_cell, val_cell in cells_by_rows]
             if self.update_on_change and (
                     self.last_output_conditions is None or
                     self.last_output_conditions != self.conditions):
-                self.commit()
+                self.commit.deferred()
         except AttributeError:
             # Attribute error appears if the signal is triggered when the
             # controls are being constructed
             pass
 
-    def _values_to_floats(self, attr, values):
-        if not len(values):
+    @staticmethod
+    def _values_to_floats(attr, values):
+        if len(values) == 0:
             return values
         if not all(values):
             return None
         if isinstance(attr, TimeVariable):
+            values = (value.toString(format=Qt.ISODate) for value in values)
             parse = lambda x: (attr.parse(x), True)
         else:
             parse = QLocale().toDouble
@@ -468,6 +608,7 @@ class OWSelectRows(widget.OWWidget):
         assert all(isinstance(v, float) for v in floats)
         return floats
 
+    @gui.deferred
     def commit(self):
         matching_output = self.data
         non_matching_output = None
@@ -478,11 +619,19 @@ class OWSelectRows(widget.OWWidget):
             domain = self.data.domain
             conditions = []
             for attr_name, oper_idx, values in self.conditions:
-                attr_index = domain.index(attr_name)
-                attr = domain[attr_index]
-                operators = self.Operators[type(attr)]
+                if attr_name in self.AllTypes:
+                    attr_index = attr = None
+                    attr_type = self.AllTypes[attr_name]
+                    operators = self.Operators[attr_name]
+                else:
+                    attr_index = domain.index(attr_name)
+                    attr = domain[attr_index]
+                    attr_type = vartype(attr)
+                    operators = self.Operators[type(attr)]
                 opertype, _ = operators[oper_idx]
-                if attr.is_continuous:
+                if attr_type == 0:
+                    filt = data_filter.IsDefined()
+                elif attr_type in (2, 4):  # continuous, time
                     try:
                         floats = self._values_to_floats(attr, values)
                     except ValueError as e:
@@ -490,10 +639,10 @@ class OWSelectRows(widget.OWWidget):
                         return
                     if floats is None:
                         continue
-                    filter = data_filter.FilterContinuous(
+                    filt = data_filter.FilterContinuous(
                         attr_index, opertype, *floats)
-                elif attr.is_string:
-                    filter = data_filter.FilterString(
+                elif attr_type == 3:  # string
+                    filt = data_filter.FilterString(
                         attr_index, opertype, *[str(v) for v in values])
                 else:
                     if opertype == FilterDiscreteType.IsDefined:
@@ -511,14 +660,14 @@ class OWSelectRows(widget.OWWidget):
                             f_values = set(values)
                         else:
                             raise ValueError("invalid operand")
-                    filter = data_filter.FilterDiscrete(attr_index, f_values)
-                conditions.append(filter)
+                    filt = data_filter.FilterDiscrete(attr_index, f_values)
+                conditions.append(filt)
 
             if conditions:
-                self.filters = data_filter.Values(conditions)
-                matching_output = self.filters(self.data)
-                self.filters.negate = True
-                non_matching_output = self.filters(self.data)
+                filters = data_filter.Values(conditions)
+                matching_output = filters(self.data)
+                filters.negate = True
+                non_matching_output = filters(self.data)
 
                 row_sel = np.in1d(self.data.ids, matching_output.ids)
                 annotated_output = create_annotated_table(self.data, row_sel)
@@ -542,11 +691,11 @@ class OWSelectRows(widget.OWWidget):
                 non_matching_output = remover(non_matching_output)
                 annotated_output = remover(annotated_output)
 
-        if matching_output is not None and not len(matching_output):
+        if not matching_output:
             matching_output = None
-        if non_matching_output is not None and not len(non_matching_output):
+        if not non_matching_output:
             non_matching_output = None
-        if annotated_output is not None and not len(annotated_output):
+        if not annotated_output:
             annotated_output = None
 
         self.Outputs.matching_data.send(matching_output)
@@ -555,21 +704,6 @@ class OWSelectRows(widget.OWWidget):
 
         self.match_desc = report.describe_data_brief(matching_output)
         self.nonmatch_desc = report.describe_data_brief(non_matching_output)
-
-        self.update_info(matching_output, self.data_out_rows, "Out: ")
-
-    def update_info(self, data, lab1, label):
-        def sp(s, capitalize=True):
-            return s and s or ("No" if capitalize else "no"), "s" * (s != 1)
-
-        if data is None:
-            lab1.setText("")
-        else:
-            lab1.setText(label + "~%s row%s, %s variable%s" %
-                         (sp(data.approx_len()) +
-                          sp(len(data.domain.variables) +
-                             len(data.domain.metas)))
-                        )
 
     def send_report(self):
         if not self.data:
@@ -588,37 +722,39 @@ class OWSelectRows(widget.OWWidget):
             pdesc = ndesc
 
         conditions = []
-        domain = self.data.domain
-        for attr_name, oper, values in self.conditions:
-            attr_index = domain.index(attr_name)
-            attr = domain[attr_index]
-            names = self.operator_names[type(attr)]
+        for attr, oper, values in self.conditions:
+            if isinstance(attr, str):
+                attr_name = attr
+                var_type = self.AllTypes[attr]
+                names = self.operator_names[attr_name]
+            else:
+                attr_name = attr.name
+                var_type = vartype(attr)
+                names = self.operator_names[type(attr)]
             name = names[oper]
             if oper == len(names) - 1:
-                conditions.append("{} {}".format(attr, name))
-            elif attr.is_discrete:
+                conditions.append("{} {}".format(attr_name, name))
+            elif var_type == 1:  # discrete
                 if name == "is one of":
-                    if len(values) == 1:
-                        conditions.append("{} is {}".format(
-                            attr, attr.values[values[0] - 1]))
-                    elif len(values) > 1:
-                        conditions.append("{} is {} or {}".format(
-                            attr,
-                            ", ".join(attr.values[v - 1] for v in values[:-1]),
-                            attr.values[values[-1] - 1]))
-                else:
-                    if not (values and values[0]):
+                    valnames = [attr.values[v - 1] for v in values]
+                    if not valnames:
                         continue
+                    if len(valnames) == 1:
+                        valstr = valnames[0]
+                    else:
+                        valstr = f"{', '.join(valnames[:-1])} or {valnames[-1]}"
+                    conditions.append(f"{attr} is {valstr}")
+                elif values and values[0]:
                     value = values[0] - 1
-                    conditions.append("{} {} {}".
-                                      format(attr, name, attr.values[value]))
-            else:
-                if len(values) == 1:
-                    conditions.append("{} {} {}".
-                                      format(attr, name, *values))
-                else:
-                    conditions.append("{} {} {} and {}".
-                                      format(attr, name, *values))
+                    conditions.append(f"{attr} {name} {attr.values[value]}")
+            elif var_type == 3:  # string variable
+                conditions.append(
+                    f"{attr} {name} {' and '.join(map(repr, values))}")
+            elif var_type == 4:  # time
+                values = (value.toString(format=Qt.ISODate) for value in values)
+                conditions.append(f"{attr} {name} {' and '.join(values)}")
+            elif all(x for x in values):  # numeric variable
+                conditions.append(f"{attr} {name} {' and '.join(values)}")
         items = OrderedDict()
         if describe_domain:
             items.update(self.data_desc)
@@ -643,9 +779,17 @@ class OWSelectRows(widget.OWWidget):
                  ("Non-matching data",
                   nonmatch_inst > 0 and "{} instances".format(nonmatch_inst))))
 
+    # Uncomment this on 2022/2/2
+    #
+    # @classmethod
+    # def migrate_context(cls, context, version):
+    #     if not version or version < 2:
+    #         # Just remove; can't migrate because variables types are unknown
+    #         context.values["conditions"] = []
+
 
 class CheckBoxPopup(QWidget):
-    def __init__(self, var, lc, widget_parent=None, widget=None):
+    def __init__(self, var, lc, widget_parent=None, widg=None):
         QWidget.__init__(self)
 
         self.list_view = QListView()
@@ -669,7 +813,7 @@ class CheckBoxPopup(QWidget):
         self.adjustSize()
         self.setWindowFlags(Qt.Popup)
 
-        self.widget = widget
+        self.widget = widg
         self.widget.desc_text = ', '.join(text)
         self.widget.set_text()
 
@@ -696,9 +840,79 @@ class DropDownToolButton(QToolButton):
         self.setText(metrics.elidedText(self.desc_text, Qt.ElideRight,
                                         self.width() - 15))
 
-    def resizeEvent(self, QResizeEvent):
+    def resizeEvent(self, _):
         self.set_text()
 
 
+class DateTimeWidget(QDateTimeEdit):
+    def __init__(self, parent, column, datetime_format):
+        QDateTimeEdit.__init__(self, parent)
+
+        self.format = datetime_format
+        self.have_date, self.have_time = datetime_format[0], datetime_format[1]
+        self.set_format(column)
+        self.setSizePolicy(
+            QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding))
+
+    def set_format(self, column):
+        str_format = Qt.ISODate
+        if self.have_date and self.have_time:
+            self.setDisplayFormat("yyyy-MM-dd hh:mm:ss")
+            c_format = "%Y-%m-%d %H:%M:%S"
+            min_datetime, max_datetime = self.find_range(column, c_format)
+            self.min_datetime = QDateTime.fromString(min_datetime, str_format)
+            self.max_datetime = QDateTime.fromString(max_datetime, str_format)
+            self.setCalendarPopup(True)
+            self.calendarWidget = gui.CalendarWidgetWithTime(
+                self, time=self.min_datetime.time())
+            self.calendarWidget.timeedit.timeChanged.connect(
+                self.set_datetime)
+            self.setCalendarWidget(self.calendarWidget)
+            self.setDateTimeRange(self.min_datetime, self.max_datetime)
+
+        elif self.have_date and not self.have_time:
+            self.setDisplayFormat("yyyy-MM-dd")
+            self.setCalendarPopup(True)
+            min_datetime, max_datetime = self.find_range(column, "%Y-%m-%d")
+            self.min_datetime = QDate.fromString(min_datetime, str_format)
+            self.max_datetime = QDate.fromString(max_datetime, str_format)
+            self.setDateRange(self.min_datetime, self.max_datetime)
+
+        elif not self.have_date and self.have_time:
+            self.setDisplayFormat("hh:mm:ss")
+            min_datetime, max_datetime = self.find_range(column, "%H:%M:%S")
+            self.min_datetime = QTime.fromString(min_datetime, str_format)
+            self.max_datetime = QTime.fromString(max_datetime, str_format)
+            self.setTimeRange(self.min_datetime, self.max_datetime)
+
+    def set_datetime(self, date_time):
+        if not date_time:
+            date_time = self.min_datetime
+        if self.have_date and self.have_time:
+            if isinstance(date_time, QTime):
+                self.setDateTime(
+                    QDateTime(self.date(), self.calendarWidget.timeedit.time()))
+            else:
+                self.setDateTime(date_time)
+        elif self.have_date and not self.have_time:
+            self.setDate(date_time)
+        elif not self.have_date and self.have_time:
+            self.setTime(date_time)
+
+    @staticmethod
+    def find_range(column, convert_format):
+        def convert_timestamp(timestamp):
+            if timestamp >= 0:
+                return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            return datetime(1970, 1, 1, tzinfo=timezone.utc) + \
+                       timedelta(seconds=int(timestamp))
+
+        min_datetime = convert_timestamp(
+            np.nanmin(column)).strftime(convert_format)
+        max_datetime = convert_timestamp(
+            np.nanmax(column)).strftime(convert_format)
+        return min_datetime, max_datetime
+
+
 if __name__ == "__main__":  # pragma: no cover
-    WidgetPreview(OWSelectRows).run(Table("zoo"))
+    WidgetPreview(OWSelectRows).run(Table("heart_disease"))

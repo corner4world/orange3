@@ -1,5 +1,5 @@
 # Test methods with long descriptive names can omit docstrings
-# pylint: disable=missing-docstring
+# pylint: disable=missing-docstring,unsubscriptable-object
 from Orange.data import Table
 from Orange.widgets.data.owdatainfo import OWDataInfo
 from Orange.widgets.tests.base import WidgetTest
@@ -17,7 +17,8 @@ class TestOWDataInfo(WidgetTest):
     def test_empty_data(self):
         """No crash on empty data"""
         data = Table("iris")
-        self.send_signal(self.widget.Inputs.data, Table(data.domain))
+        self.send_signal(self.widget.Inputs.data,
+                         Table.from_domain(data.domain))
 
     def test_data_attributes(self):
         """No crash on data attributes of different types"""

@@ -1,15 +1,18 @@
 # Test methods with long descriptive names can omit docstrings
-# pylint: disable=missing-docstring
+# pylint: disable=missing-docstring,protected-access
 import unittest
+from unittest.mock import Mock, patch
 
 import numpy as np
 
-from AnyQt.QtCore import QPoint
+from AnyQt.QtCore import QPoint, QPropertyAnimation
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable
 from Orange.classification import (
     NaiveBayesLearner, LogisticRegressionLearner, MajorityLearner
 )
+from Orange.preprocess import Scale, Continuize
+from Orange.tests import test_filename
 from Orange.widgets.tests.base import WidgetTest
 from Orange.widgets.visualize.ownomogram import (
     OWNomogram, DiscreteFeatureItem, ContinuousFeatureItem, ProbabilitiesDotItem,
@@ -25,7 +28,7 @@ class TestOWNomogram(WidgetTest):
         cls.nb_cls = NaiveBayesLearner()(cls.data)
         cls.lr_cls = LogisticRegressionLearner()(cls.data)
         cls.titanic = Table("titanic")
-        cls.lenses = Table("lenses")
+        cls.lenses = Table(test_filename("datasets/lenses.tab"))
 
     def setUp(self):
         self.widget = self.create_widget(OWNomogram)  # type: OWNomogram
@@ -94,7 +97,9 @@ class TestOWNomogram(WidgetTest):
     def test_nomogram_lr_multiclass(self):
         """Check probabilities for logistic regression classifier for various
         values of classes and radio buttons for multiclass data"""
-        cls = LogisticRegressionLearner()(self.lenses)
+        cls = LogisticRegressionLearner(
+            multi_class="ovr", solver="liblinear"
+        )(self.lenses)
         self._test_helper(cls, [9, 45, 52])
 
     def test_nomogram_with_instance_nb(self):
@@ -211,6 +216,102 @@ class TestOWNomogram(WidgetTest):
         # had problems on PyQt4
         m = MovableToolTip()
         m.show(QPoint(0, 0), "Some text.")
+
+    def test_output(self):
+        cls = LogisticRegressionLearner()(self.titanic)
+        data = self.titanic[10:11]
+        status, age, sex = data.domain.attributes
+        self.send_signal(self.widget.Inputs.classifier, cls)
+        self.widget.sort_combo.setCurrentIndex(1)
+        self.widget.sort_combo.activated.emit(1)
+
+        # Output more attributer than there are -> output all
+        self.widget.n_attributes = 5
+        self.widget.n_spin.valueChanged.emit(5)
+        attrs = self.get_output(self.widget.Outputs.features)
+        self.assertEqual(attrs, [age, sex, status])
+
+        # Output the first two
+        self.widget.n_attributes = 2
+        self.widget.n_spin.valueChanged.emit(2)
+        attrs = self.get_output(self.widget.Outputs.features)
+        self.assertEqual(attrs, [age, sex])
+
+        # Set to output all
+        self.widget.display_index = 0
+        self.widget.controls.display_index.group.buttonClicked[int].emit(0)
+        attrs = self.get_output(self.widget.Outputs.features)
+        self.assertEqual(attrs, [age, sex, status])
+
+        # Remove classifier -> output None
+        self.send_signal(self.widget.Inputs.classifier, None)
+        attrs = self.get_output(self.widget.Outputs.features)
+        self.assertIsNone(attrs)
+
+    def test_reset_settings(self):
+        self.widget.n_attributes = 5
+        self.widget.n_spin.valueChanged.emit(5)
+        self.widget.reset_settings()
+        self.assertEqual(10, self.widget.n_attributes)
+
+    @patch("Orange.widgets.visualize.ownomogram.QGraphicsTextItem")
+    def test_adjust_scale(self, mocked_item: Mock):
+        def mocked_width():
+            nonlocal ind
+            ind += 1
+            most_right = {4: 30, 9: 59, 14: 59}
+            return [2, 30, 59, 2, most_right.get(ind)][ind % 5]
+
+        ind = -1
+        mocked_item().boundingRect().width.side_effect = mocked_width
+        attrs = [DiscreteVariable("var1", values=("foo1", "foo2")),
+                 DiscreteVariable("var2", values=("foo3", "foo4"))]
+        points = [np.array([0, 1.8]), np.array([1.5, 2.0])]
+        diff = np.max(points) - np.min(points)
+        # foo3 eventually overcomes foo2, while the scale is getting smaller
+        #
+        #  0                        1              1.5         1.8     2
+        # foo1                                          _______foo2_______
+        #                               __________foo3__________      foo4
+        self.widget._adjust_scale(attrs, points, 100, diff, [0, 1], [], 0)
+        # most left text at 1. iteration
+        self.assertEqual(mocked_item.call_args_list[5][0][0], "foo2")
+        # most left text at 2. iteration
+        self.assertEqual(mocked_item.call_args_list[10][0][0], "foo3")
+        # most left text at 3. iteration is the same -> stop
+        self.assertEqual(mocked_item.call_args_list[15][0][0], "foo3")
+
+    def test_dots_stop_flashing(self):
+        self.widget.set_data(self.data)
+        self.widget.set_classifier(self.nb_cls)
+        animator = self.widget.dot_animator
+        dot = animator._GraphicsColorAnimator__items[0]
+        dot._mousePressFunc()
+        anim = animator._GraphicsColorAnimator__animation
+        self.assertNotEqual(anim.state(), QPropertyAnimation.Running)
+
+    def test_reconstruct_domain(self):
+        data = Table("heart_disease")
+        cls = LogisticRegressionLearner()(data)
+        domain = OWNomogram.reconstruct_domain(cls.original_domain, cls.domain)
+        transformed_data = cls.original_data.transform(domain)
+        self.assertEqual(transformed_data.X.shape, data.X.shape)
+        self.assertFalse(np.isnan(transformed_data.X[0]).any())
+
+        scaled_data = Scale()(data)
+        cls = LogisticRegressionLearner()(scaled_data)
+        domain = OWNomogram.reconstruct_domain(cls.original_domain, cls.domain)
+        transformed_data = cls.original_data.transform(domain)
+        self.assertEqual(transformed_data.X.shape, scaled_data.X.shape)
+        self.assertFalse(np.isnan(transformed_data.X[0]).any())
+
+        disc_data = Continuize()(data)
+        cls = LogisticRegressionLearner()(disc_data)
+        domain = OWNomogram.reconstruct_domain(cls.original_domain, cls.domain)
+        transformed_data = cls.original_data.transform(domain)
+        self.assertEqual(transformed_data.X.shape, disc_data.X.shape)
+        self.assertFalse(np.isnan(transformed_data.X[0]).any())
+
 
 if __name__ == "__main__":
     unittest.main()

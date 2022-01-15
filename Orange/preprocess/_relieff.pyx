@@ -1,3 +1,4 @@
+#distutils: language = c++
 #cython: boundscheck=False
 #cython: wraparound=False
 #cython: initializedcheck=False
@@ -21,7 +22,6 @@ from libc.math cimport fabs, exp
 from libcpp.vector cimport vector
 from libcpp.utility cimport pair
 from libcpp.algorithm cimport make_heap, pop_heap
-from libcpp.map cimport map as cpp_map
 
 # Import C99 features from numpy's npy_math (MSVC 2010)
 # Note we cannot import isnan due to mixing C++ and C
@@ -34,7 +34,6 @@ ctypedef np.intp_t[:]   arr_intp_t
 ctypedef double[:, :]   arr_f2_t
 ctypedef double[:]      arr_f1_t
 ctypedef pair[double, Py_ssize_t] HeapPair
-ctypedef cpp_map[Py_ssize_t, arr_f2_t] Contingencies
 
 
 cdef inline bint isnan(double x) nogil:
@@ -67,7 +66,7 @@ cdef inline void calc_difference(arr_f2_t X,
                                  Py_ssize_t j,
                                  arr_i1_t is_discrete,
                                  arr_f2_t attr_stats,
-                                 Contingencies &contingencies,
+                                 contingencies,
                                  arr_f1_t difference,
                                  double * difference_sum) nogil:
     """Calculate difference between two instance vectors."""
@@ -85,7 +84,9 @@ cdef inline void calc_difference(arr_f2_t X,
             # Replace missing values with their conditional probabilities
             xi, xj = X[i, a], X[j, a]
             if is_discrete[a]:
-                cont = contingencies[a]
+                with gil:
+                    cont = contingencies[a]
+
                 # TODO: what if the attribute only has a single non-nan value?
                 if isnan(xi) and isnan(xj):
                     # ibid. §2.2, eq. 4
@@ -121,7 +122,7 @@ cdef void k_nearest_reg(arr_f2_t X,
                         Py_ssize_t k_nearest,
                         arr_i1_t is_discrete,
                         arr_f2_t attr_stats,
-                        Contingencies &contingencies,
+                        contingencies,
                         arr_f1_t difference,
                         double * Nc,
                         arr_f1_t Na,
@@ -186,7 +187,7 @@ cdef void k_nearest_per_class(arr_f2_t X,
                               Py_ssize_t n_classes,
                               arr_i1_t is_discrete,
                               arr_f2_t attr_stats,
-                              Contingencies &contingencies,
+                              contingencies,
                               arr_f2_t weights_adj,
                               arr_f1_t difference) nogil:
     """The k-nearest search for ReliefF."""
@@ -226,7 +227,7 @@ cdef arr_f1_t _relieff_reg_(arr_f2_t X,
                             int k_nearest,
                             arr_i1_t is_discrete,
                             arr_f2_t attr_stats,
-                            Contingencies &contingencies):
+                            contingencies):
     """
     The main loop of the RReliefF for regression (ibid. §2.3, Figure 3).
     """
@@ -263,7 +264,7 @@ cdef arr_f1_t _relieff_cls_(arr_f2_t X,
                             arr_i1_t is_discrete,
                             arr_f1_t prior_proba,
                             arr_f2_t attr_stats,
-                            Contingencies &contingencies):
+                            contingencies):
     """
     The main loop of the ReliefF for classification (ibid. §2.1, Figure 2).
     """
@@ -303,7 +304,7 @@ cdef inline void _contingency_table(np.ndarray x1,
                                     int n_unique1,
                                     np.ndarray x2,
                                     int n_unique2,
-                                    Contingencies &tables,
+                                    tables,
                                     Py_ssize_t attribute):
     cdef:
         np.ndarray table = np.zeros((n_unique1, n_unique2))
@@ -318,13 +319,13 @@ cdef inline void _contingency_table(np.ndarray x1,
     row_sums = table.sum(0)
     row_sums[row_sums == 0] = np.inf  # Avoid zero-division
     table /= row_sums
-    tables.insert((attribute, table))
+    tables[attribute] = table
 
 
 def contingency_table(x1, x2):
     """Return contingency array between x1 and x2."""
     cdef:
-        Contingencies tables = Contingencies()
+        tables = {}
         arr_f2_t table
         int n1 = int(nanmax(x1) + 1), n2 = int(nanmax(x2) + 1)
     if isnan(n1) or isnan(n2):
@@ -337,7 +338,7 @@ def contingency_table(x1, x2):
 cdef void contingency_tables(np.ndarray X,
                              np.ndarray y,
                              arr_i1_t is_discrete,
-                             Contingencies &tables):
+                             tables):
     """
     Populate contingency tables between attributes of `X` and class values `y`.
     """
@@ -351,7 +352,7 @@ cdef void contingency_tables(np.ndarray X,
                               y, ny, tables, a)
 
 
-cdef tuple prepare(X, y, is_discrete, Contingencies &contingencies):
+cdef tuple prepare(X, y, is_discrete, contingencies):
     X = np.array(X, dtype=np.float64, order='C')
     is_discrete = np.asarray(is_discrete, dtype=np.bool8)
     is_continuous = ~is_discrete
@@ -361,7 +362,12 @@ cdef tuple prepare(X, y, is_discrete, Contingencies &contingencies):
         row_ptp[row_ptp == 0] = np.inf  # Avoid zero-division
         X[:, is_continuous] -= row_min[is_continuous]
         X[:, is_continuous] /= row_ptp[is_continuous]
-    y = np.array(y, dtype=np.float64)
+    if y.ndim > 1:
+        if y.shape[1] > 1:
+            raise ValueError("ReliefF expects a single class")
+        y = np.array(y[:, 0], dtype=np.float64)
+    else:
+        y = np.array(y, dtype=np.float64)
     is_defined = np.logical_not(np.isnan(y))
     X = X[is_defined]
     y = y[is_defined]
@@ -381,7 +387,7 @@ cpdef arr_f1_t relieff(np.ndarray X,
     Score attributes of `X` according to ReliefF and return their weights.
     """
     cdef:
-        Contingencies contingencies = Contingencies()
+        contingencies = {}
     if not isinstance(rstate, np.random.RandomState):
         raise TypeError('rstate')
     cdef:
@@ -404,7 +410,7 @@ cpdef arr_f1_t rrelieff(np.ndarray X,
     Score attributes of `X` according to RReliefF and return their weights.
     """
     cdef:
-        Contingencies contingencies = Contingencies()
+        contingencies = {}
     if not isinstance(rstate, np.random.RandomState):
         raise TypeError('rstate')
 

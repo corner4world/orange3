@@ -1,11 +1,15 @@
 import sys
+from functools import wraps
+
 import warnings
 import contextlib
 
 from AnyQt.QtCore import Qt, QObject, QEventLoop, QTimer, QLocale, QPoint
 from AnyQt.QtTest import QTest
-from AnyQt.QtGui import QMouseEvent
-from AnyQt.QtWidgets import QApplication
+from AnyQt.QtGui import QMouseEvent, QContextMenuEvent
+from AnyQt.QtWidgets import QApplication, QWidget
+
+from Orange.data import Table, Domain, ContinuousVariable
 
 
 class EventSpy(QObject):
@@ -78,7 +82,7 @@ class EventSpy(QObject):
         self.__timer.stop()
         self.__timer.setInterval(timeout)
         self.__timer.start()
-        self.__loop.exec_()
+        self.__loop.exec()
         self.__timer.stop()
         return len(self.__record) != count
 
@@ -138,11 +142,6 @@ def excepthook_catch(raise_on_exit=True):
     [(<class 'ZeroDivisionError'>, ZeroDivisionError('division by zero',), ...
     """
     excepthook = sys.excepthook
-    if excepthook != sys.__excepthook__:
-        warnings.warn(
-            "sys.excepthook was already patched (is {})"
-            "(just thought you should know this)".format(excepthook),
-            RuntimeWarning, stacklevel=2)
     seen = []
 
     def excepthook_handle(exctype, value, traceback):
@@ -317,3 +316,67 @@ def mouseMove(widget, pos=QPoint(), delay=-1):  # pragma: no-cover
         QTest.qWait(delay)
 
     QApplication.sendEvent(widget, me)
+
+
+def contextMenu(
+        widget: QWidget, pos=QPoint(), reason=QContextMenuEvent.Mouse,
+        modifiers=Qt.NoModifier, delay=-1
+) -> None:
+    """
+    Simulate a context menu event on `widget`.
+
+    `pos` is the event origin specified in widget's local coordinates. If not
+    specified. Then widget.rect().center() is used instead.
+    """
+    if pos.isNull():
+        pos = widget.rect().center()
+    globalPos = widget.mapToGlobal(pos)
+    ev = QContextMenuEvent(reason, pos, globalPos, modifiers)
+    if delay >= 0:
+        QTest.qWait(delay)
+    QApplication.sendEvent(widget, ev)
+
+
+def table_dense_sparse(test_case):
+    # type: (Callable) -> Callable
+    """Run a single test case on both dense and sparse Orange tables.
+
+    Examples
+    --------
+    >>> @table_dense_sparse
+    ... def test_something(self, prepare_table):
+    ...     data: Table  # The table you want to test on
+    ...     data = prepare_table(data)  # This converts the table to dense/sparse
+
+    """
+
+    @wraps(test_case)
+    def _wrapper(self):
+        # Make sure to call setUp and tearDown methods in between test runs so
+        # any widget state doesn't interfere between tests
+        test_case(self, lambda table: table.to_dense())
+        self.tearDown()
+        self.setUp()
+        test_case(self, lambda table: table.to_sparse())
+
+    return _wrapper
+
+
+def possible_duplicate_table(name, table_name='iris', class_var=False):
+    """
+    Used for checking whether widget resolves possible domain duplicates.
+    If the programmer inputs name that will create duplicates and it later fails,
+    that's on them.
+    """
+    data = Table(table_name)
+    attributes = data.domain.attributes
+    class_vars = list(data.domain.class_vars)
+    if class_var:
+        class_vars[0] = ContinuousVariable(name)
+    else:
+        attributes = list(data.domain.attributes[1:])
+        attributes.append(ContinuousVariable(name))
+    domain = Domain(attributes,
+                    class_vars,
+                    data.domain.metas)
+    return Table.from_numpy(domain, data.X, data.Y, data.metas)

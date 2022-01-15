@@ -5,13 +5,10 @@ from operator import iadd
 import numpy
 
 from AnyQt.QtWidgets import (
-    QFormLayout, QGraphicsRectItem, QGraphicsGridLayout, QApplication
+    QGraphicsRectItem, QGraphicsGridLayout, QApplication, QSizePolicy
 )
-from AnyQt.QtGui import (
-    QFontMetrics, QPen, QIcon, QPixmap, QLinearGradient, QPainter, QColor,
-    QBrush, QTransform
-)
-from AnyQt.QtCore import Qt, QRect, QRectF, QSize, QPointF
+from AnyQt.QtGui import QFontMetrics, QPen, QTransform, QFont
+from AnyQt.QtCore import Qt, QRect, QRectF, QPointF
 from AnyQt.QtCore import pyqtSignal as Signal
 
 import pyqtgraph as pg
@@ -22,13 +19,20 @@ from Orange.clustering import hierarchical
 from Orange.data.domain import filter_visible
 
 from Orange.widgets import widget, gui, settings
-from Orange.widgets.utils import itemmodels, colorbrewer
+from Orange.widgets.utils import itemmodels, colorpalettes
 from Orange.widgets.utils.annotated_data import (create_annotated_table,
                                                  ANNOTATED_DATA_SIGNAL_NAME)
+from Orange.widgets.utils.graphicsscene import graphicsscene_help_event
+from Orange.widgets.utils.graphicstextlist import TextListWidget
 from Orange.widgets.utils.widgetpreview import WidgetPreview
+from Orange.widgets.visualize.utils.plotutils import HelpEventDelegate
 from Orange.widgets.widget import Input, Output
-from Orange.widgets.unsupervised.owhierarchicalclustering import (
-    DendrogramWidget, GraphicsSimpleTextList)
+from Orange.widgets.utils.dendrogram import DendrogramWidget
+from Orange.widgets.visualize.utils.heatmap import (
+    GradientColorMap, GradientLegendWidget,
+)
+from Orange.widgets.utils.colorgradientselection import ColorGradientSelection
+
 
 def _remove_item(item):
     item.setParentItem(None)
@@ -75,8 +79,6 @@ class DistanceMapItem(pg.ImageItem):
 
         if command & self.Select:
             area = area.normalized()
-            intersects = [rect.intersects(area)
-                          for item, rect in self.__selections]
 
             def partition(predicate, iterable):
                 t1, t2 = itertools.tee(iterable)
@@ -225,6 +227,16 @@ class DistanceMapItem(pg.ImageItem):
                  range(r.left(), r.right() + 1))
                 for r in selections]
 
+    def set_selections(self, ranges):
+        self.__clearSelections()
+        for y, x in ranges:
+            area = QRectF(x.start, y.start,
+                          x.stop - x.start - 1, y.stop - y.start - 1)
+            item = DistanceMapItem.SelectionRect(area, self)
+            item.setPen(QPen(Qt.red, 0))
+            self.__selections.append((item, area))
+        self.selectionChanged.emit()
+
     def hoverMoveEvent(self, event):
         super().hoverMoveEvent(event)
         i, j = self._cellAt(event.pos())
@@ -235,9 +247,16 @@ class DistanceMapItem(pg.ImageItem):
             self.setToolTip("")
 
 
-_color_palettes = sorted(colorbrewer.colorSchemes["sequential"].items()) + \
-                  [("Blue-Yellow", {2: [(0, 0, 255), (255, 255, 0)]})]
-_default_colormap_index = len(_color_palettes) - 1
+class GraphicsView(pg.GraphicsView):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        scene = self.scene()
+        delegate = HelpEventDelegate(self.__helpEvent, parent=self)
+        scene.installEventFilter(delegate)
+
+    def __helpEvent(self, event):
+        graphicsscene_help_event(self.scene(), event)
+        return event.isAccepted()
 
 
 class OWDistanceMap(widget.OWWidget):
@@ -262,30 +281,28 @@ class OWDistanceMap(widget.OWWidget):
 
     sorting = settings.Setting(NoOrdering)
 
-    colormap = settings.Setting(_default_colormap_index)
+    palette_name = settings.Setting(colorpalettes.DefaultContinuousPaletteName)
     color_gamma = settings.Setting(0.0)
     color_low = settings.Setting(0.0)
     color_high = settings.Setting(1.0)
 
     annotation_idx = settings.ContextSetting(0)
+    pending_selection = settings.Setting(None, schema_only=True)
 
     autocommit = settings.Setting(True)
 
     graph_name = "grid_widget"
 
     # Disable clustering for inputs bigger than this
-    if hierarchical._HAS_NN_CHAIN:
-        _MaxClustering = 25000
-    else:
-        _MaxClustering = 3000
-
+    _MaxClustering = 25000
     # Disable cluster leaf ordering for inputs bigger than this
-    _MaxOrderedClustering = 1000
+    _MaxOrderedClustering = 2000
 
     def __init__(self):
         super().__init__()
 
         self.matrix = None
+        self._matrix_range = 0.
         self._tree = None
         self._ordered_tree = None
         self._sorted_matrix = None
@@ -298,60 +315,50 @@ class OWDistanceMap(widget.OWWidget):
             callback=self._invalidate_ordering)
 
         box = gui.vBox(self.controlArea, "Colors")
-        self.colormap_cb = gui.comboBox(
-            box, self, "colormap", callback=self._update_color)
-        self.colormap_cb.setIconSize(QSize(64, 16))
-        self.palettes = list(_color_palettes)
+        self.color_map_widget = cmw = ColorGradientSelection(
+            thresholds=(self.color_low, self.color_high),
+        )
+        model = itemmodels.ContinuousPalettesModel(parent=self)
+        cmw.setModel(model)
+        idx = cmw.findData(self.palette_name, model.KeyRole)
+        if idx != -1:
+            cmw.setCurrentIndex(idx)
 
-        init_color_combo(self.colormap_cb, self.palettes, QSize(64, 16))
-        self.colormap_cb.setCurrentIndex(self.colormap)
+        cmw.activated.connect(self._update_color)
 
-        form = QFormLayout(
-            formAlignment=Qt.AlignLeft,
-            labelAlignment=Qt.AlignLeft,
-            fieldGrowthPolicy=QFormLayout.AllNonFixedFieldsGrow
-        )
-#         form.addRow(
-#             "Gamma",
-#             gui.hSlider(box, self, "color_gamma", minValue=0.0, maxValue=1.0,
-#                         step=0.05, ticks=True, intOnly=False,
-#                         createLabel=False, callback=self._update_color)
-#         )
-        form.addRow(
-            "Low:",
-            gui.hSlider(box, self, "color_low", minValue=0.0, maxValue=1.0,
-                        step=0.05, ticks=True, intOnly=False,
-                        createLabel=False, callback=self._update_color)
-        )
-        form.addRow(
-            "High:",
-            gui.hSlider(box, self, "color_high", minValue=0.0, maxValue=1.0,
-                        step=0.05, ticks=True, intOnly=False,
-                        createLabel=False, callback=self._update_color)
-        )
-        box.layout().addLayout(form)
+        def _set_thresholds(low, high):
+            self.color_low, self.color_high = low, high
+            self._update_color()
+
+        cmw.thresholdsChanged.connect(_set_thresholds)
+        box.layout().addWidget(self.color_map_widget)
 
         self.annot_combo = gui.comboBox(
             self.controlArea, self, "annotation_idx", box="Annotations",
-            callback=self._invalidate_annotations, contentsLength=12)
+            contentsLength=12, searchable=True,
+            callback=self._invalidate_annotations
+        )
         self.annot_combo.setModel(itemmodels.VariableListModel())
         self.annot_combo.model()[:] = ["None", "Enumeration"]
-        self.controlArea.layout().addStretch()
+        gui.rubber(self.controlArea)
 
-        gui.auto_commit(self.controlArea, self, "autocommit",
-                        "Send Selected")
+        gui.auto_send(self.buttonsArea, self, "autocommit")
 
-        self.view = pg.GraphicsView(background="w")
+        self.view = GraphicsView(background="w")
         self.mainArea.layout().addWidget(self.view)
 
         self.grid_widget = pg.GraphicsWidget()
         self.grid = QGraphicsGridLayout()
         self.grid_widget.setLayout(self.grid)
 
+        self.gradient_legend = GradientLegendWidget(0, 1, self._color_map())
+        self.gradient_legend.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.gradient_legend.setMaximumWidth(250)
+        self.grid.addItem(self.gradient_legend, 0, 1)
         self.viewbox = pg.ViewBox(enableMouse=False, enableMenu=False)
         self.viewbox.setAcceptedMouseButtons(Qt.NoButton)
         self.viewbox.setAcceptHoverEvents(False)
-        self.grid.addItem(self.viewbox, 1, 1)
+        self.grid.addItem(self.viewbox, 2, 1)
 
         self.left_dendrogram = DendrogramWidget(
             self.grid_widget, orientation=DendrogramWidget.Left,
@@ -369,20 +376,25 @@ class OWDistanceMap(widget.OWWidget):
         self.top_dendrogram.setAcceptedMouseButtons(Qt.NoButton)
         self.top_dendrogram.setAcceptHoverEvents(False)
 
-        self.grid.addItem(self.left_dendrogram, 1, 0)
-        self.grid.addItem(self.top_dendrogram, 0, 1)
+        self.grid.addItem(self.left_dendrogram, 2, 0)
+        self.grid.addItem(self.top_dendrogram, 1, 1)
 
         self.right_labels = TextList(
-            alignment=Qt.AlignLeft)
-
+            alignment=Qt.AlignLeft | Qt.AlignVCenter,
+            sizePolicy=QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        )
         self.bottom_labels = TextList(
-            orientation=Qt.Horizontal, alignment=Qt.AlignRight)
+            orientation=Qt.Horizontal,
+            alignment=Qt.AlignRight | Qt.AlignVCenter,
+            sizePolicy=QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        )
 
-        self.grid.addItem(self.right_labels, 1, 2)
-        self.grid.addItem(self.bottom_labels, 2, 1)
+        self.grid.addItem(self.right_labels, 2, 2)
+        self.grid.addItem(self.bottom_labels, 3, 1)
 
         self.view.setCentralItem(self.grid_widget)
 
+        self.gradient_legend.hide()
         self.left_dendrogram.hide()
         self.top_dendrogram.hide()
         self.right_labels.hide()
@@ -391,7 +403,13 @@ class OWDistanceMap(widget.OWWidget):
         self.matrix_item = None
         self.dendrogram = None
 
-        self.grid_widget.scene().installEventFilter(self)
+        self.settingsAboutToBePacked.connect(self.pack_settings)
+
+    def pack_settings(self):
+        if self.matrix_item is not None:
+            self.pending_selection = self.matrix_item.selections()
+        else:
+            self.pending_selection = None
 
     @Inputs.distances
     def set_distances(self, matrix):
@@ -406,8 +424,10 @@ class OWDistanceMap(widget.OWWidget):
 
         self.matrix = matrix
         if matrix is not None:
+            self._matrix_range = numpy.nanmax(matrix)
             self.set_items(matrix.row_items, matrix.axis)
         else:
+            self._matrix_range = 0.
             self.set_items(None)
 
         if matrix is not None:
@@ -461,7 +481,6 @@ class OWDistanceMap(widget.OWWidget):
 
     def clear(self):
         self.matrix = None
-        self.cluster = None
         self._tree = None
         self._ordered_tree = None
         self._sorted_matrix = None
@@ -473,7 +492,10 @@ class OWDistanceMap(widget.OWWidget):
             self._update_ordering()
             self._setup_scene()
             self._update_labels()
-        self.unconditional_commit()
+            if self.pending_selection is not None:
+                self.matrix_item.set_selections(self.pending_selection)
+                self.pending_selection = None
+        self.commit.now()
 
     def _clear_plot(self):
         def remove(item):
@@ -488,6 +510,7 @@ class OWDistanceMap(widget.OWWidget):
 
         self._set_displayed_dendrogram(None)
         self._set_labels(None)
+        self.gradient_legend.hide()
 
     def _cluster_tree(self):
         if self._tree is None:
@@ -589,27 +612,30 @@ class OWDistanceMap(widget.OWWidget):
             labels = [labels[i] for i in sortind]
 
         for textlist in [self.right_labels, self.bottom_labels]:
-            textlist.set_labels(labels or [])
+            textlist.setItems(labels or [])
             textlist.setVisible(bool(labels))
 
         constraint = -1 if labels else 0
         self.right_labels.setMaximumWidth(constraint)
         self.bottom_labels.setMaximumHeight(constraint)
 
-    def _update_color(self):
-        if self.matrix_item:
-            name, colors = self.palettes[self.colormap]
-            n, colors = max(colors.items())
-            colors = numpy.array(colors, dtype=numpy.ubyte)
-            low, high = self.color_low * 255, self.color_high * 255
-            points = numpy.linspace(low, high, n)
-            space = numpy.linspace(0, 255, 255)
+    def _color_map(self) -> GradientColorMap:
+        palette = self.color_map_widget.currentData()
+        return GradientColorMap(
+            palette.lookup_table(),
+            thresholds=(self.color_low, max(self.color_high, self.color_low)),
+            span=(0., self._matrix_range))
 
-            r = numpy.interp(space, points, colors[:, 0], left=255, right=0)
-            g = numpy.interp(space, points, colors[:, 1], left=255, right=0)
-            b = numpy.interp(space, points, colors[:, 2], left=255, right=0)
-            colortable = numpy.c_[r, g, b]
-            self.matrix_item.setLookupTable(colortable)
+    def _update_color(self):
+        palette = self.color_map_widget.currentData()
+        self.palette_name = palette.name
+        if self.matrix_item:
+            cmap = self._color_map().replace(span=(0., 1.))
+            colors = cmap.apply(numpy.arange(256) / 255.)
+            self.matrix_item.setLookupTable(colors)
+            self.gradient_legend.show()
+            self.gradient_legend.setRange(0, self._matrix_range)
+            self.gradient_legend.setColorMap(self._color_map())
 
     def _invalidate_selection(self):
         ranges = self.matrix_item.selections()
@@ -619,8 +645,9 @@ class OWDistanceMap(widget.OWWidget):
             sortind = self._sort_indices
             indices = [sortind[i] for i in indices]
         self._selection = list(sorted(set(indices)))
-        self.commit()
+        self.commit.deferred()
 
+    @gui.deferred
     def commit(self):
         datasubset = None
         featuresubset = None
@@ -661,18 +688,18 @@ class OWDistanceMap(widget.OWWidget):
             self.report_plot()
 
 
-class TextList(GraphicsSimpleTextList):
+class TextList(TextListWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._updateFontSize()
 
     def _updateFontSize(self):
         crect = self.contentsRect()
-        if self.orientation == Qt.Vertical:
+        if self.orientation() == Qt.Vertical:
             h = crect.height()
         else:
             h = crect.width()
-        n = len(getattr(self, "label_items", []))
+        n = self.count()
         if n == 0:
             return
 
@@ -681,15 +708,12 @@ class TextList(GraphicsSimpleTextList):
         else:
             maxfontsize = QApplication.instance().font().pointSize()
 
-        lineheight = max(1, h / n)
+        lineheight = max(1., h / n)
         fontsize = min(self._point_size(lineheight), maxfontsize)
 
-        font = self.font()
-        font.setPointSize(fontsize)
-
-        self.setFont(font)
-        self.layout().invalidate()
-        self.layout().activate()
+        font_ = QFont()
+        font_.setPointSize(fontsize)
+        self.setFont(font_)
 
     def _point_size(self, height):
         font = self.font()
@@ -699,45 +723,6 @@ class TextList(GraphicsSimpleTextList):
             fix += 1
             font.setPointSize(height - fix)
         return height - fix
-
-
-##########################
-# Color palette management
-##########################
-
-
-def palette_gradient(colors, discrete=False):
-    n = len(colors)
-    stops = numpy.linspace(0.0, 1.0, n, endpoint=True)
-    gradstops = [(float(stop), color) for stop, color in zip(stops, colors)]
-    grad = QLinearGradient(QPointF(0, 0), QPointF(1, 0))
-    grad.setStops(gradstops)
-    return grad
-
-
-def palette_pixmap(colors, size):
-    img = QPixmap(size)
-    img.fill(Qt.transparent)
-
-    painter = QPainter(img)
-    grad = palette_gradient(colors)
-    grad.setCoordinateMode(QLinearGradient.ObjectBoundingMode)
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QBrush(grad))
-    painter.drawRect(0, 0, size.width(), size.height())
-    painter.end()
-    return img
-
-
-def init_color_combo(cb, palettes, iconsize):
-    cb.clear()
-    iconsize = cb.iconSize()
-
-    for name, palette in palettes:
-        n, colors = max(palette.items())
-        colors = [QColor(*c) for c in colors]
-        cb.addItem(QIcon(palette_pixmap(colors, iconsize)), name,
-                   palette)
 
 
 # run widget with `python -m Orange.widgets.unsupervised.owdistancemap`

@@ -21,11 +21,12 @@ from AnyQt.QtCore import pyqtSignal as Signal
 
 import pyqtgraph as pg
 
-import Orange.data
+from Orange.data import ContinuousVariable, DiscreteVariable, Domain, Table
+from Orange.data.util import get_unique_names_duplicates
 
 from Orange.widgets import gui
 from Orange.widgets.settings import Setting
-from Orange.widgets.utils import itemmodels, colorpalette
+from Orange.widgets.utils import itemmodels, colorpalettes
 
 from Orange.util import scale, namegen
 from Orange.widgets.utils.widgetpreview import WidgetPreview
@@ -127,7 +128,7 @@ def delete(command, data, ):
         condition = indices_to_mask(command.indices, len(data))
     else:
         indices = np.asarray(command.indices)
-        if indices.dtype == np.bool:
+        if indices.dtype == bool:
             condition = indices
         else:
             condition = indices_to_mask(indices, len(data))
@@ -216,6 +217,7 @@ class DataTool(QObject):
             self._cursor = QCursor(cursor)
             self.cursorChanged.emit()
 
+    # pylint: disable=unused-argument,no-self-use,unnecessary-pass
     def mousePressEvent(self, event):
         return False
 
@@ -278,19 +280,19 @@ class PenTool(DataTool):
             self.editingStarted.emit()
             self.__handleEvent(event)
             return True
-        return super().mousePressEvent()
+        return super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.LeftButton:
             self.__handleEvent(event)
             return True
-        return super().mouseMoveEvent()
+        return super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.editingFinished.emit()
             return True
-        return super().mouseReleaseEvent()
+        return super().mouseReleaseEvent(event)
 
     def __handleEvent(self, event):
         pos = self.mapToPlot(event.pos())
@@ -339,6 +341,7 @@ class AirBrushTool(DataTool):
 
 
 def random_state(rstate):
+    # pylint gives false positive for RandomState, pylint: disable=no-member
     if isinstance(rstate, np.random.RandomState):
         return rstate
     return np.random.RandomState(rstate)
@@ -524,10 +527,10 @@ class SelectTool(DataTool):
         self._plot.addAction(self._delete_action)
 
     def deactivate(self):
-        self._reset()
+        self.reset()
         self._plot.removeAction(self._delete_action)
 
-    def _reset(self):
+    def reset(self):
         self.setSelectionRect(QRectF())
         self._item.setVisible(False)
         self._mouse_dragging = False
@@ -535,7 +538,7 @@ class SelectTool(DataTool):
     def delete(self):
         if not self._mouse_dragging and self._item.isVisible():
             self.issueCommand.emit(DeleteSelection())
-            self._reset()
+            self.reset()
 
     def _on_region_changed(self):
         if not self._mouse_dragging:
@@ -560,8 +563,7 @@ class ClearTool(DataTool):
 
     def activate(self):
         self.editingStarted.emit()
-        self.issueCommand.emit(SelectRegion(self._plot.rect()))
-        self.issueCommand.emit(DeleteSelection())
+        self.issueCommand.emit(DeleteIndices(slice(None, None, None)))
         self.editingFinished.emit()
 
 
@@ -594,6 +596,8 @@ class UndoCommand(QUndoCommand):
         self._model.execute(self._undo)
 
     def mergeWith(self, other):
+        # other is another instance of the same class, thus
+        # pylint: disable=protected-access
         if self.id() != other.id():
             return False
 
@@ -615,7 +619,8 @@ class UndoCommand(QUndoCommand):
         self._undo = merged_undo
         return True
 
-    def id(self):
+    @staticmethod
+    def id():  # pylint: disable=invalid-name
         return 1
 
 
@@ -705,13 +710,12 @@ class ColoredListModel(itemmodels.PyListModel):
 
         super().__init__(iterable, parent, flags, list_item_role,
                          supportedDropActions)
-        self.colors = colorpalette.ColorPaletteGenerator(
-            len(colorpalette.DefaultRGBColors))
+        self.colors = colorpalettes.DefaultRGBColors
 
     def data(self, index, role=Qt.DisplayRole):
         if self._is_index_valid(index) and \
                 role == Qt.DecorationRole and \
-                0 <= index.row() < self.colors.number_of_colors:
+                0 <= index.row() < len(self):
             return gui.createAttributePixmap("", self.colors[index.row()])
         return super().data(index, role)
 
@@ -739,10 +743,10 @@ class OWPaintData(OWWidget):
     keywords = ["create", "draw"]
 
     class Inputs:
-        data = Input("Data", Orange.data.Table)
+        data = Input("Data", Table)
 
     class Outputs:
-        data = Output("Data", Orange.data.Table)
+        data = Output("Data", Table)
 
     autocommit = Setting(True)
     table_name = Setting("Painted data")
@@ -758,12 +762,15 @@ class OWPaintData(OWWidget):
     data = Setting(None, schema_only=True)
     labels = Setting(["C1", "C2"], schema_only=True)
 
+    buttons_area_orientation = Qt.Vertical
     graph_name = "plot"
 
     class Warning(OWWidget.Warning):
         no_input_variables = Msg("Input data has no variables")
-        continuous_target = Msg("Continuous target value can not be used.")
+        continuous_target = Msg("Numeric target value can not be used.")
         sparse_not_supported = Msg("Sparse data is ignored.")
+        renamed_vars = Msg("Some variables have been renamed "
+                           "to avoid duplicates.\n{}")
 
     class Information(OWWidget.Information):
         use_first_two = \
@@ -795,7 +802,9 @@ class OWPaintData(OWWidget):
         self.class_model.rowsInserted.connect(self._class_count_changed)
         self.class_model.rowsRemoved.connect(self._class_count_changed)
 
-        if not self.data:
+        # if self.data: raises Deprecation warning in older workflows, where
+        # data could be a np.array. This would raise an error in the future.
+        if self.data is None or len(self.data) == 0:
             self.data = []
             self.__buffer = np.zeros((0, 3))
         elif isinstance(self.data, np.ndarray):
@@ -804,12 +813,11 @@ class OWPaintData(OWWidget):
         else:
             self.__buffer = np.array(self.data)
 
-        self.colors = colorpalette.ColorPaletteGenerator(
-            len(colorpalette.DefaultRGBColors))
+        self.colors = colorpalettes.DefaultRGBColors
         self.tools_cache = {}
 
         self._init_ui()
-        self.commit()
+        self.commit.now()
 
     def _init_ui(self):
         namesBox = gui.vBox(self.controlArea, "Names")
@@ -827,7 +835,6 @@ class OWPaintData(OWWidget):
         gui.checkBox(hbox, self, "hasAttr2", '', disables=attr2,
                      labelWidth=0,
                      callback=self.set_dimensions)
-        gui.separator(namesBox)
 
         gui.widgetLabel(namesBox, "Labels")
         self.classValuesView = listView = gui.ListViewWithSizeHint(
@@ -855,9 +862,8 @@ class OWPaintData(OWWidget):
         actionsWidget.layout().setSpacing(1)
         namesBox.layout().addWidget(actionsWidget)
 
-        tBox = gui.vBox(self.controlArea, "Tools", addSpace=True)
-        buttonBox = gui.hBox(tBox)
-        toolsBox = gui.widgetBox(buttonBox, orientation=QGridLayout())
+        tBox = gui.vBox(self.buttonsArea, "Tools")
+        toolsBox = gui.widgetBox(tBox, orientation=QGridLayout())
 
         self.toolActions = QActionGroup(self)
         self.toolActions.setExclusive(True)
@@ -881,7 +887,7 @@ class OWPaintData(OWWidget):
             button.setDefaultAction(action)
             self.toolButtons.append((button, tool))
 
-            toolsBox.layout().addWidget(button, i / 3, i % 3)
+            toolsBox.layout().addWidget(button, i // 3, i % 3)
             self.toolActions.addAction(action)
 
         for column in range(3):
@@ -895,9 +901,8 @@ class OWPaintData(OWWidget):
         redo.setShortcut(QKeySequence.Redo)
 
         self.addActions([undo, redo])
-        self.undo_stack.indexChanged.connect(lambda _: self.invalidate())
+        self.undo_stack.indexChanged.connect(self.invalidate)
 
-        gui.separator(tBox)
         indBox = gui.indentedBox(tBox, sep=8)
         form = QFormLayout(
             formAlignment=Qt.AlignLeft,
@@ -907,20 +912,20 @@ class OWPaintData(OWWidget):
         indBox.layout().addLayout(form)
         slider = gui.hSlider(
             indBox, self, "brushRadius", minValue=1, maxValue=100,
-            createLabel=False
+            createLabel=False, addToLayout=False
         )
         form.addRow("Radius:", slider)
 
         slider = gui.hSlider(
             indBox, self, "density", None, minValue=1, maxValue=100,
-            createLabel=False
+            createLabel=False, addToLayout=False
         )
 
         form.addRow("Intensity:", slider)
 
         slider = gui.hSlider(
             indBox, self, "symbol_size", None, minValue=1, maxValue=100,
-            createLabel=False, callback=self.set_symbol_size
+            createLabel=False, callback=self.set_symbol_size, addToLayout=False
         )
 
         form.addRow("Symbol:", slider)
@@ -929,8 +934,7 @@ class OWPaintData(OWWidget):
             tBox, self, "Reset to Input Data", self.reset_to_input)
         self.btResetToInput.setDisabled(True)
 
-        gui.auto_commit(self.left_side, self, "autocommit",
-                        "Send")
+        gui.auto_send(self.buttonsArea, self, "autocommit")
 
         # main area GUI
         viewbox = PaintViewBox(enableMouse=False)
@@ -975,11 +979,11 @@ class OWPaintData(OWWidget):
         if self.hasAttr2:
             self.plot.setYRange(0, 1, padding=0.01)
             self.plot.showAxis('left')
-            self.plotview.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+            self.plotview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         else:
             self.plot.setYRange(-.5, .5, padding=0.01)
             self.plot.hideAxis('left')
-            self.plotview.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)
+            self.plotview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self._replot()
         for button, tool in self.toolButtons:
             if tool.only2d:
@@ -993,7 +997,7 @@ class OWPaintData(OWWidget):
             if data and data.is_sparse():
                 self.Warning.sparse_not_supported()
                 return False
-            if data is not None and len(data):
+            if data:
                 if not data.domain.attributes:
                     self.Warning.no_input_variables()
                     data = None
@@ -1001,7 +1005,7 @@ class OWPaintData(OWWidget):
                     self.Information.use_first_two()
             self.input_data = data
             self.btResetToInput.setDisabled(data is None)
-            return data is not None and len(data)
+            return bool(data)
 
         if not _check_and_set_data(data):
             return
@@ -1017,7 +1021,7 @@ class OWPaintData(OWWidget):
             y = np.zeros(len(data))
         else:
             self.input_classes = y.values
-            self.input_colors = y.colors
+            self.input_colors = y.palette
 
             y = data[:, y].Y
 
@@ -1027,7 +1031,7 @@ class OWPaintData(OWWidget):
         else:
             self.input_data = np.column_stack((X, y))
         self.reset_to_input()
-        self.unconditional_commit()
+        self.commit.now()
 
     def reset_to_input(self):
         """Reset the painting to input data if present."""
@@ -1037,11 +1041,9 @@ class OWPaintData(OWWidget):
 
         index = self.selected_class_label()
         if self.input_colors is not None:
-            colors = self.input_colors
+            palette = self.input_colors
         else:
-            colors = colorpalette.DefaultRGBColors
-        palette = colorpalette.ColorPaletteGenerator(
-            number_of_colors=len(colors), rgb_colors=colors)
+            palette = colorpalettes.DefaultRGBColors
         self.colors = palette
         self.class_model.colors = palette
         self.class_model[:] = self.input_classes
@@ -1058,6 +1060,8 @@ class OWPaintData(OWWidget):
             self.set_dimensions()
         else:  # set_dimensions already calls _replot, no need to call it again
             self._replot()
+
+        self.commit.deferred()
 
     def add_new_class_label(self, undoable=True):
 
@@ -1098,7 +1102,7 @@ class OWPaintData(OWWidget):
         self.labels = list(self.class_model)
         self.removeClassLabel.setEnabled(len(self.class_model) > 1)
         self.addClassLabel.setEnabled(
-            len(self.class_model) < self.colors.number_of_colors)
+            len(self.class_model) < len(self.colors))
         if self.selected_class_label() is None:
             itemmodels.select_row(self.classValuesView, 0)
 
@@ -1137,7 +1141,6 @@ class OWPaintData(OWWidget):
             self.tools_cache[tool] = newtool
             newtool.issueCommand.connect(self._add_command)
 
-        self._selected_region = QRectF()
         self.current_tool = tool = self.tools_cache[tool]
         self.plot.getViewBox().tool = tool
         tool.editingStarted.connect(self._on_editing_started)
@@ -1154,20 +1157,20 @@ class OWPaintData(OWWidget):
         self.undo_stack.endMacro()
 
     def execute(self, command):
-        if isinstance(command, (Append, DeleteIndices, Insert, Move)):
-            if isinstance(command, (DeleteIndices, Insert)):
-                self._selected_indices = None
+        assert isinstance(command, (Append, DeleteIndices, Insert, Move)), \
+            "Non normalized command"
+        if isinstance(command, (DeleteIndices, Insert)):
+            self._selected_indices = None
 
-                if isinstance(self.current_tool, SelectTool):
-                    self.current_tool._reset()
+            if isinstance(self.current_tool, SelectTool):
+                self.current_tool.reset()
 
-            self.__buffer, undo = transform(command, self.__buffer)
-            self._replot()
-            return undo
-        else:
-            assert False, "Non normalized command"
+        self.__buffer, undo = transform(command, self.__buffer)
+        self._replot()
+        return undo
 
     def _add_command(self, cmd):
+        # pylint: disable=too-many-branches
         name = "Name"
 
         if (not self.hasAttr2 and
@@ -1210,7 +1213,10 @@ class OWPaintData(OWWidget):
             data = create_data(cmd.pos.x(), cmd.pos.y(),
                                self.brushRadius / 1000,
                                int(1 + self.density / 20), cmd.rstate)
-            self._add_command(Append([QPointF(*p) for p in zip(*data.T)]))
+            data = data[(np.min(data, axis=1) >= 0)
+                        & (np.max(data, axis=1) <= 1), :]
+            if data.size:
+                self._add_command(Append([QPointF(*p) for p in zip(*data.T)]))
         elif isinstance(cmd, Jitter):
             point = np.array([cmd.pos.x(), cmd.pos.y()])
             delta = - apply_jitter(self.__buffer[:, :2], point,
@@ -1257,30 +1263,42 @@ class OWPaintData(OWWidget):
 
     def invalidate(self):
         self.data = self.__buffer.tolist()
-        self.commit()
+        self.commit.deferred()
 
+    @gui.deferred
     def commit(self):
-        data = np.array(self.data)
-        if len(data) == 0:
+        self.Warning.renamed_vars.clear()
+
+        if not self.data:
             self.Outputs.data.send(None)
             return
+        data = np.array(self.data)
         if self.hasAttr2:
             X, Y = data[:, :2], data[:, 2]
-            attrs = (Orange.data.ContinuousVariable(self.attr1),
-                     Orange.data.ContinuousVariable(self.attr2))
+            proposed = [self.attr1.strip(), self.attr2.strip()]
         else:
             X, Y = data[:, np.newaxis, 0], data[:, 2]
-            attrs = (Orange.data.ContinuousVariable(self.attr1),)
+            proposed = [self.attr1.strip()]
+
         if len(np.unique(Y)) >= 2:
-            domain = Orange.data.Domain(
-                attrs,
-                Orange.data.DiscreteVariable(
-                    "Class", values=list(self.class_model))
+            proposed.append("Class")
+            unique_names, renamed = get_unique_names_duplicates(proposed, True)
+            domain = Domain(
+                (map(ContinuousVariable, unique_names[:-1])),
+                DiscreteVariable(
+                    unique_names[-1], values=tuple(self.class_model))
             )
-            data = Orange.data.Table.from_numpy(domain, X, Y)
+            data = Table.from_numpy(domain, X, Y)
         else:
-            domain = Orange.data.Domain(attrs)
-            data = Orange.data.Table.from_numpy(domain, X)
+            unique_names, renamed = get_unique_names_duplicates(proposed, True)
+            domain = Domain(map(ContinuousVariable, unique_names))
+            data = Table.from_numpy(domain, X)
+
+        if renamed:
+            self.Warning.renamed_vars(", ".join(renamed))
+            self.plot.getAxis("bottom").setLabel(unique_names[0])
+            self.plot.getAxis("left").setLabel(unique_names[1])
+
         data.name = self.table_name
         self.Outputs.data.send(data)
 
@@ -1289,6 +1307,7 @@ class OWPaintData(OWWidget):
         return sh.expandedTo(QSize(570, 690))
 
     def onDeleteWidget(self):
+        self.undo_stack.indexChanged.disconnect(self.invalidate)
         self.plot.clear()
 
     def send_report(self):

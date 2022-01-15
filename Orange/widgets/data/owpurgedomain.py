@@ -1,4 +1,5 @@
-from AnyQt.QtCore import Qt
+from AnyQt.QtWidgets import QFrame
+
 from Orange.data import Table
 from Orange.preprocess.remove import Remove
 from Orange.widgets import gui, widget
@@ -13,7 +14,7 @@ class OWPurgeDomain(widget.OWWidget):
     description = "Remove redundant values and features from the dataset. " \
                   "Sort values."
     icon = "icons/PurgeDomain.svg"
-    category = "Data"
+    category = "Transform"
     keywords = ["remove", "delete", "unused"]
 
     class Inputs:
@@ -34,7 +35,6 @@ class OWPurgeDomain(widget.OWWidget):
 
     want_main_area = False
     resizing_enabled = False
-    buttons_area_orientation = Qt.Vertical
 
     feature_options = (('sortValues', 'Sort categorical feature values'),
                        ('removeValues', 'Remove unused feature values'),
@@ -69,44 +69,46 @@ class OWPurgeDomain(widget.OWWidget):
         self.removedMetas = "-"
         self.reducedMetas = "-"
 
+        def add_line(parent):
+            frame = QFrame()
+            frame.setFrameShape(QFrame.HLine)
+            frame.setFrameShadow(QFrame.Sunken)
+            parent.layout().addWidget(frame)
+
         boxAt = gui.vBox(self.controlArea, "Features")
-        for not_first, (value, label) in enumerate(self.feature_options):
-            if not_first:
-                gui.separator(boxAt, 2)
+        for value, label in self.feature_options:
             gui.checkBox(boxAt, self, value, label,
-                         callback=self.optionsChanged)
+                         callback=self.commit.deferred)
+        add_line(boxAt)
+        gui.label(boxAt, self,
+                  "Sorted: %(resortedAttrs)s, "
+                  "reduced: %(reducedAttrs)s, removed: %(removedAttrs)s")
 
-        boxAt = gui.vBox(self.controlArea, "Classes", addSpace=True)
-        for not_first, (value, label) in enumerate(self.class_options):
-            if not_first:
-                gui.separator(boxAt, 2)
+        boxAt = gui.vBox(self.controlArea, "Classes")
+        for value, label in self.class_options:
             gui.checkBox(boxAt, self, value, label,
-                         callback=self.optionsChanged)
+                         callback=self.commit.deferred)
+        add_line(boxAt)
+        gui.label(boxAt, self,
+                  "Sorted: %(resortedClasses)s,"
+                  "reduced: %(reducedClasses)s, removed: %(removedClasses)s")
 
-        boxAt = gui.vBox(self.controlArea, "Meta attributes", addSpace=True)
-        for not_first, (value, label) in enumerate(self.meta_options):
-            if not_first:
-                gui.separator(boxAt, 2)
+        boxAt = gui.vBox(self.controlArea, "Meta attributes")
+        for value, label in self.meta_options:
             gui.checkBox(boxAt, self, value, label,
-                         callback=self.optionsChanged)
+                         callback=self.commit.deferred)
+        add_line(boxAt)
+        gui.label(boxAt, self,
+                  "Reduced: %(reducedMetas)s, removed: %(removedMetas)s")
 
-        box3 = gui.vBox(self.controlArea, 'Statistics', addSpace=True)
-        for i, (label, value) in enumerate(self.stat_labels):
-            # add a separator after each group of three
-            if i != 0 and i % 3 == 0:
-                gui.separator(box3, 2)
-            gui.label(box3, self, "{}: %({})s".format(label, value))
-
-        gui.auto_commit(self.buttonsArea, self, "autoSend", "Apply",
-                        orientation=Qt.Horizontal)
-        gui.rubber(self.controlArea)
+        gui.auto_send(self.buttonsArea, self, "autoSend")
 
     @Inputs.data
     @check_sql_input
     def setData(self, dataset):
         if dataset is not None:
             self.data = dataset
-            self.unconditional_commit()
+            self.commit.now()
         else:
             self.removedAttrs = "-"
             self.reducedAttrs = "-"
@@ -119,9 +121,7 @@ class OWPurgeDomain(widget.OWWidget):
             self.Outputs.data.send(None)
             self.data = None
 
-    def optionsChanged(self):
-        self.commit()
-
+    @gui.deferred
     def commit(self):
         if self.data is None:
             return
@@ -135,7 +135,7 @@ class OWPurgeDomain(widget.OWWidget):
         meta_flags = sum([Remove.RemoveConstant * self.removeMetaAttributes,
                           Remove.RemoveUnusedValues * self.removeMetaAttributeValues])
         remover = Remove(attr_flags, class_flags, meta_flags)
-        data = remover(self.data)
+        cleaned = remover(self.data)
         attr_res, class_res, meta_res = \
             remover.attr_results, remover.class_results, remover.meta_results
 
@@ -150,7 +150,7 @@ class OWPurgeDomain(widget.OWWidget):
         self.removedMetas = meta_res['removed']
         self.reducedMetas = meta_res['reduced']
 
-        self.Outputs.data.send(data)
+        self.Outputs.data.send(cleaned)
 
     def send_report(self):
         def list_opts(opts):
@@ -170,7 +170,7 @@ class OWPurgeDomain(widget.OWWidget):
 
 
 if __name__ == "__main__":  # pragma: no cover
-    data = Table("car.tab")
+    data = Table.from_url("https://datasets.biolab.si/core/car.tab")
     subset = [inst for inst in data if inst["buying"] == "v-high"]
     subset = Table(data.domain, subset)
     # The "buying" should be removed and the class "y" reduced

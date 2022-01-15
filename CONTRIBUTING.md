@@ -3,27 +3,35 @@ Contributing
 
 Thanks for taking the time to contribute to Orange!
 
+This document outlines our guidelines and standards of
+contributing to Orange. If anything is unclear, feel free
+to join our [Discord server] for a chat.
+
 Please submit contributions in accordance with the flow explained in the
 [GitHub Guides].
 
 [GitHub Guides]: https://guides.github.com/
+[Discord server]: https://discord.gg/FWrfeXV
 
 
 Installing for development
 --------------------------
-See the relevant section in the [README file].
+Install Orange as suggested in [README]. Then:
 
-[README file]: https://github.com/biolab/orange3
+    git clone https://github.com/biolab/orange3.git
+    cd orange3
+    python setup.py develop
+
+[README]: https://github.com/biolab/orange3/blob/master/README.md
 
 
 Reporting bugs
 --------------
-Please report bugs according to established [bug reporting guidelines].
+When reporting bugs, please fill out the [issue template] to the best of your ability.
 At least, include a method to reproduce the bug (if consistently
 reproducible) and a screenshot (if applicable).
 
-[bug reporting guidelines]: https://www.google.com/search?q=reporting+bugs
-
+[issue template]: https://github.com/biolab/orange3/issues/new?assignees=&labels=bug+report&template=bug_report.md&title=
 
 Coding style
 ------------
@@ -97,8 +105,8 @@ _Orange/widgets/*/tests_, as appropriate. Ensure the tests pass by running:
 
 Additionally, check that the tests for widgets pass:
 
-    python -m unittest -v Orange.widgets.tests \
-                          Orange.canvas.report.tests
+    python -m unittest -v Orange.tests \
+                          Orange.widgets.tests
 
 If testing on GNU/Linux, perhaps install _xvfb_ package and prefix the above
 command with `xvfb-run `.

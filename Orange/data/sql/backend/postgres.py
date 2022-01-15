@@ -4,7 +4,7 @@ import warnings
 from contextlib import contextmanager
 from time import time
 
-from psycopg2 import Error  # pylint: disable=import-error
+from psycopg2 import Error, ProgrammingError  # pylint: disable=import-error
 from psycopg2.pool import ThreadedConnectionPool  # pylint: disable=import-error
 
 from Orange.data import ContinuousVariable, DiscreteVariable, StringVariable, TimeVariable
@@ -81,7 +81,7 @@ class Psycopg2Backend(Backend):
             cur.execute(query, params)
             yield cur
             log.info("%.2f ms: %s", 1000 * (time() - t), utfquery)
-        except Error as ex:
+        except (Error, ProgrammingError) as ex:
             raise BackendError(str(ex)) from ex
         finally:
             connection.commit()
@@ -179,6 +179,12 @@ class Psycopg2Backend(Backend):
         with self.execute_sql_query(sql) as cur:
             s = ''.join(row[0] for row in cur.fetchall())
         return int(re.findall(r'rows=(\d*)', s)[0])
+
+    def distinct_values_query(self, field_name: str, table_name: str) -> str:
+        fields = [self.quote_identifier(field_name)]
+        return self.create_sql_query(
+            table_name, fields, group_by=fields, order_by=fields, limit=21
+        )
 
     def __getstate__(self):
         # Drop connection_pool from state as it cannot be pickled

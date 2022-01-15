@@ -1,22 +1,25 @@
+#pylint: disable=unsubscriptable-object
 import datetime
+import unittest
 from collections import namedtuple
-from functools import wraps, partial
+from functools import partial
 from itertools import chain
-from typing import Callable, List
+from typing import List
 
 import numpy as np
 from AnyQt.QtCore import QItemSelection, QItemSelectionRange, \
     QItemSelectionModel, Qt
 
+from orangewidget.settings import Context
+
 from Orange.data import Table, Domain, StringVariable, ContinuousVariable, \
     DiscreteVariable, TimeVariable
-from Orange.widgets.tests.base import WidgetTest
-from Orange.widgets.tests.utils import simulate
+from Orange.widgets.tests.base import WidgetTest, datasets
+from Orange.widgets.tests.utils import simulate, table_dense_sparse
 from Orange.widgets.data.owfeaturestatistics import \
     OWFeatureStatistics
 
 VarDataPair = namedtuple('VarDataPair', ['variable', 'data'])
-
 
 # Continuous variable variations
 continuous_full = VarDataPair(
@@ -42,23 +45,23 @@ continuous = [
 
 # Unordered discrete variable variations
 rgb_full = VarDataPair(
-    DiscreteVariable('rgb_full', values=['r', 'g', 'b']),
+    DiscreteVariable('rgb_full', values=('r', 'g', 'b')),
     np.array([0, 1, 1, 1, 2], dtype=float),
 )
 rgb_missing = VarDataPair(
-    DiscreteVariable('rgb_missing', values=['r', 'g', 'b']),
+    DiscreteVariable('rgb_missing', values=('r', 'g', 'b')),
     np.array([0, 1, 1, np.nan, 2], dtype=float),
 )
 rgb_all_missing = VarDataPair(
-    DiscreteVariable('rgb_all_missing', values=['r', 'g', 'b']),
+    DiscreteVariable('rgb_all_missing', values=('r', 'g', 'b')),
     np.array([np.nan] * 5, dtype=float),
 )
 rgb_bins_missing = VarDataPair(
-    DiscreteVariable('rgb_bins_missing', values=['r', 'g', 'b']),
+    DiscreteVariable('rgb_bins_missing', values=('r', 'g', 'b')),
     np.array([np.nan, 1, 1, 1, np.nan], dtype=float),
 )
 rgb_same = VarDataPair(
-    DiscreteVariable('rgb_same', values=['r', 'g', 'b']),
+    DiscreteVariable('rgb_same', values=('r', 'g', 'b')),
     np.array([2] * 5, dtype=float),
 )
 rgb = [
@@ -67,23 +70,23 @@ rgb = [
 
 # Ordered discrete variable variations
 ints_full = VarDataPair(
-    DiscreteVariable('ints_full', values=['2', '3', '4'], ordered=True),
+    DiscreteVariable('ints_full', values=('2', '3', '4')),
     np.array([0, 1, 1, 1, 2], dtype=float),
 )
 ints_missing = VarDataPair(
-    DiscreteVariable('ints_missing', values=['2', '3', '4'], ordered=True),
+    DiscreteVariable('ints_missing', values=('2', '3', '4')),
     np.array([0, 1, 1, np.nan, 2], dtype=float),
 )
 ints_all_missing = VarDataPair(
-    DiscreteVariable('ints_all_missing', values=['2', '3', '4'], ordered=True),
+    DiscreteVariable('ints_all_missing', values=('2', '3', '4')),
     np.array([np.nan] * 5, dtype=float),
 )
 ints_bins_missing = VarDataPair(
-    DiscreteVariable('ints_bins_missing', values=['2', '3', '4'], ordered=True),
+    DiscreteVariable('ints_bins_missing', values=('2', '3', '4')),
     np.array([np.nan, 1, 1, 1, np.nan], dtype=float),
 )
 ints_same = VarDataPair(
-    DiscreteVariable('ints_same', values=['2', '3', '4'], ordered=True),
+    DiscreteVariable('ints_same', values=('2', '3', '4')),
     np.array([0] * 5, dtype=float),
 )
 ints = [
@@ -101,7 +104,7 @@ def _to_timestamps(years):
 # Time variable variations, windows timestamps need to be valid timestamps so
 # we'll just fill it in with arbitrary years
 time_full = VarDataPair(
-    TimeVariable('time_full'),
+    TimeVariable('time_full', have_date=True, have_time=True),
     np.array(_to_timestamps([2000, 2001, 2002, 2003, 2004]), dtype=float),
 )
 time_missing = VarDataPair(
@@ -113,11 +116,15 @@ time_all_missing = VarDataPair(
     np.array(_to_timestamps([np.nan] * 5), dtype=float),
 )
 time_same = VarDataPair(
-    TimeVariable('time_same'),
+    TimeVariable('time_same', have_date=True, have_time=True),
     np.array(_to_timestamps([2004] * 5), dtype=float),
 )
+time_negative = VarDataPair(
+    TimeVariable('time_negative', have_date=True, have_time=True),
+    np.array([0, -1, 24 * 60 * 60], dtype=float),
+)
 time = [
-    time_full, time_missing, time_all_missing, time_same
+    time_full, time_missing, time_all_missing, time_same, time_negative
 ]
 
 # String variable variations
@@ -175,19 +182,7 @@ def make_table(attributes, target=None, metas=None):
     )
 
 
-def table_dense_sparse(test_case):
-    # type: (Callable) -> Callable
-    """Run a single test case on both dense and sparse Orange tables."""
-
-    @wraps(test_case)
-    def _wrapper(self):
-        test_case(self, lambda table: table.to_dense())
-        test_case(self, lambda table: table.to_sparse())
-
-    return _wrapper
-
-
-class TestVariableTypes(WidgetTest):
+class TestVariousDataSets(WidgetTest):
     def setUp(self):
         self.widget = self.create_widget(
             OWFeatureStatistics, stored_settings={'auto_commit': False}
@@ -207,49 +202,91 @@ class TestVariableTypes(WidgetTest):
 
     @table_dense_sparse
     def test_runs_on_iris(self, prepare_table):
-        self.send_signal('Data', prepare_table(Table('iris')))
+        self.send_signal(self.widget.Inputs.data, prepare_table(Table('iris')))
 
     def test_does_not_crash_on_data_removal(self):
-        self.send_signal('Data', make_table(discrete))
-        self.send_signal('Data', None)
+        self.send_signal(self.widget.Inputs.data, make_table(discrete))
+        self.send_signal(self.widget.Inputs.data, None)
+
+    def test_does_not_crash_on_empty_domain(self):
+        empty_data = Table('iris').transform(Domain([]))
+        self.send_signal(self.widget.Inputs.data, empty_data)
 
     # No missing values
     @table_dense_sparse
     def test_on_data_with_no_missing_values(self, prepare_table):
         data = make_table([continuous_full, rgb_full, ints_full, time_full])
-        self.send_signal('Data', prepare_table(data))
+        self.send_signal(self.widget.Inputs.data, prepare_table(data))
         self.run_through_variables()
 
     @table_dense_sparse
     def test_on_data_with_no_missing_values_full_domain(self, prepare_table):
         data = make_table([continuous_full, time_full], [ints_full], [rgb_full])
-        self.send_signal('Data', prepare_table(data))
+        self.send_signal(self.widget.Inputs.data, prepare_table(data))
         self.run_through_variables()
 
     # With missing values
     @table_dense_sparse
     def test_on_data_with_missing_continuous_values(self, prepare_table):
         data = make_table([continuous_full, continuous_missing, rgb_full, ints_full, time_full])
-        self.send_signal('Data', prepare_table(data))
+        self.send_signal(self.widget.Inputs.data, prepare_table(data))
         self.run_through_variables()
 
     @table_dense_sparse
     def test_on_data_with_missing_discrete_values(self, prepare_table):
         data = make_table([continuous_full, rgb_full, rgb_missing, ints_full, time_full])
-        self.send_signal('Data', prepare_table(data))
+        self.send_signal(self.widget.Inputs.data, prepare_table(data))
         self.run_through_variables()
 
     @table_dense_sparse
     def test_on_data_with_discrete_values_all_the_same(self, prepare_table):
         data = make_table([continuous_full], [ints_same, rgb_same])
-        self.send_signal('Data', prepare_table(data))
+        self.send_signal(self.widget.Inputs.data, prepare_table(data))
         self.run_through_variables()
 
     @table_dense_sparse
     def test_on_data_with_continuous_values_all_the_same(self, prepare_table):
         data = make_table([ints_full, ints_same], [continuous_same, continuous_full])
-        self.send_signal('Data', prepare_table(data))
+        self.send_signal(self.widget.Inputs.data, prepare_table(data))
         self.run_through_variables()
+
+    @table_dense_sparse
+    def test_on_data_with_negative_timestamps(self, prepare_table):
+        data = make_table([time_negative])
+        self.send_signal(self.widget.Inputs.data, prepare_table(data))
+        self.run_through_variables()
+
+    def test_switching_to_dataset_with_no_target_var(self):
+        """Switching from data set with target variable to a data set with
+        no target variable should not result in crash."""
+        data1 = make_table([continuous_full, ints_full], [ints_same, rgb_same])
+        data2 = make_table([rgb_full, ints_full])
+
+        self.send_signal(self.widget.Inputs.data, data1)
+        self.force_render_table()
+
+        self.send_signal(self.widget.Inputs.data, data2)
+        self.force_render_table()
+
+    def test_switching_to_dataset_with_target_var(self):
+        """Switching from data set with no target variable to a data set with
+        a target variable should not result in crash."""
+        data1 = make_table([rgb_full, ints_full])
+        data2 = make_table([continuous_full, ints_full], [ints_same, rgb_same])
+
+        self.send_signal(self.widget.Inputs.data, data1)
+        self.force_render_table()
+
+        self.send_signal(self.widget.Inputs.data, data2)
+        self.force_render_table()
+
+    def test_on_edge_case_datasets(self):
+        for data in datasets.datasets():
+            try:
+                self.send_signal(self.widget.Inputs.data, data)
+                self.force_render_table()
+            except Exception as e:
+                raise AssertionError(f"Failed on `{data.name}`") from e
 
 
 def select_rows(rows: List[int], widget: OWFeatureStatistics):
@@ -420,7 +457,6 @@ class TestFeatureStatisticsUI(WidgetTest):
         self.widget = self.create_widget(
             OWFeatureStatistics, stored_settings={'auto_commit': False}
         )
-        self.widget.resetSettings()
         self.data1 = Table('iris')
         self.data2 = Table('zoo')
         self.select_rows = partial(select_rows, widget=self.widget)
@@ -428,14 +464,63 @@ class TestFeatureStatisticsUI(WidgetTest):
     def test_restores_previous_selection(self):
         """Widget should remember selection with domain context handler."""
         # Send data and select rows
+        domain1 = self.data1.domain
         self.send_signal(self.widget.Inputs.data, self.data1)
         self.select_rows([0, 2])
-        self.assertEqual(len(self.widget.selected_rows), 2)
+        self.assertEqual(set(self.widget.selected_vars),
+                         {domain1[0], domain1[2]})
 
         # Sending new data clears selection
         self.send_signal(self.widget.Inputs.data, self.data2)
-        self.assertEqual(len(self.widget.selected_rows), 0)
+        self.assertEqual(len(self.widget.selected_vars), 0)
 
         # Sending back the old data restores the selection
+        iris3 = self.data1.transform(
+            Domain([domain1[2], domain1[0], domain1[1]], domain1.class_var))
+        self.send_signal(self.widget.Inputs.data, iris3)
+        self.assertEqual(set(self.widget.selected_vars),
+                         {domain1[0], domain1[2]})
+
+    def test_settings_migration_to_ver21(self):
+        settings = {
+            'controlAreaVisible': True, 'savedWidgetGeometry': '',
+            '__version__': 1,
+            'context_settings': [
+                Context(
+                    values={'auto_commit': (True, -2),
+                            'color_var': ('iris', 101),
+                            'selected_rows': [1, 4],
+                            'sorting': ((1, 0), -2), '__version__': 1},
+                    attributes={'petal length': 2, 'petal width': 2,
+                                'sepal length': 2, 'sepal width': 2},
+                    metas={'iris': 1})]
+        }
+        widget = self.create_widget(OWFeatureStatistics,
+                                    stored_settings=settings)
+        self.send_signal(widget.Inputs.data, self.data1)
+        domain = self.data1.domain
+        self.assertEqual(widget.selected_vars, [domain["petal width"],
+                                                domain["iris"]])
+
+    def test_report(self):
         self.send_signal(self.widget.Inputs.data, self.data1)
-        self.assertEqual(len(self.widget.selected_rows), 2)
+
+        self.widget.report_button.click()
+        report_text = self.widget.report_html
+
+        self.assertIn("<table>", report_text)
+        self.assertEqual(6, report_text.count("<tr>"))  # header + 5 rows
+
+
+class TestSummary(WidgetTest):
+    def setUp(self):
+        self.widget = self.create_widget(OWFeatureStatistics)
+        self.data = make_table(
+            [continuous_full, continuous_missing],
+            target=[rgb_full, rgb_missing], metas=[ints_full, ints_missing]
+        )
+        self.select_rows = partial(select_rows, widget=self.widget)
+
+
+if __name__ == "__main__":
+    unittest.main()

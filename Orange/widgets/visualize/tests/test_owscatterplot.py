@@ -1,20 +1,24 @@
 # Test methods with long descriptive names can omit docstrings
 # pylint: disable=missing-docstring,too-many-public-methods,protected-access
+# pylint: disable=too-many-lines
 from unittest.mock import MagicMock, patch, Mock
 import numpy as np
 
 from AnyQt.QtCore import QRectF, Qt
 from AnyQt.QtWidgets import QToolTip
+from AnyQt.QtGui import QColor, QFont
 
-from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable
+from Orange.data import (
+    Table, Domain, ContinuousVariable, DiscreteVariable, TimeVariable
+)
 from Orange.widgets.tests.base import (
     WidgetTest, WidgetOutputsTestMixin, datasets, ProjectionWidgetTestMixin
 )
 from Orange.widgets.tests.utils import simulate
+from Orange.widgets.utils.colorpalettes import DefaultRGBColors
 from Orange.widgets.visualize.owscatterplot import (
-    OWScatterPlot, ScatterPlotVizRank
-)
-from Orange.widgets.visualize.utils.widget import MAX_CATEGORIES
+    OWScatterPlot, ScatterPlotVizRank, OWScatterPlotGraph)
+from Orange.widgets.visualize.utils.widget import MAX_COLORS
 from Orange.widgets.widget import AttributeList
 
 
@@ -75,35 +79,25 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         self.assertEqual([x.name for x in vizrank.score_heuristic()],
                          list("abcd"))
 
-    def test_score_heuristics_no_disc(self):
-        domain = Domain([ContinuousVariable(c) for c in "abc"] +
-                        [DiscreteVariable("d", values="abcdefghij")],
-                        DiscreteVariable("e", values="ab"))
-        a = np.arange(10).reshape((10, 1))
-        data = Table(domain, np.hstack([a, a, a, a]), a >= 5)
-        self.send_signal(self.widget.Inputs.data, data)
-        vizrank = ScatterPlotVizRank(self.widget)
-        self.assertEqual([x.name for x in vizrank.score_heuristic()],
-                         list("abc"))
-
     def test_optional_combos(self):
         domain = self.data.domain
         d1 = Domain(domain.attributes[:2], domain.class_var,
                     [domain.attributes[2]])
-        t1 = Table(d1, self.data)
+        t1 = self.data.transform(d1)
         self.send_signal(self.widget.Inputs.data, t1)
         self.widget.graph.attr_size = domain.attributes[2]
 
         d2 = Domain(domain.attributes[:2], domain.class_var,
                     [domain.attributes[3]])
-        t2 = Table(d2, self.data)
+        t2 = self.data.transform(d2)
         self.send_signal(self.widget.Inputs.data, t2)
 
     def test_error_message(self):
         """Check if error message appears and then disappears when
         data is removed from input"""
         data = self.data.copy()
-        data.X[:, 0] = np.nan
+        with data.unlocked():
+            data.X[:, 0] = np.nan
         self.send_signal(self.widget.Inputs.data, data)
         self.assertTrue(self.widget.Warning.missing_coords.is_shown())
         self.send_signal(self.widget.Inputs.data, None)
@@ -144,6 +138,18 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         self.send_signal(self.widget.Inputs.data, table)
         attr_x = self.widget.controls.attr_x
         simulate.combobox_activate_item(attr_x, "b")
+
+    def test_regression_line(self):
+        """It is possible to draw the line only for pair of continuous attrs"""
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.assertTrue(self.widget.cb_reg_line.isEnabled())
+        self.assertIsNone(self.widget.graph.reg_line_item)
+        self.widget.cb_reg_line.setChecked(True)
+        self.assertIsNotNone(self.widget.graph.reg_line_item)
+        self.widget.cb_attr_y.activated.emit(4)
+        self.widget.cb_attr_y.setCurrentIndex(4)
+        self.assertFalse(self.widget.cb_reg_line.isEnabled())
+        self.assertIsNone(self.widget.graph.reg_line_item)
 
     def test_points_combo_boxes(self):
         """Check Point box combo models and values"""
@@ -194,7 +200,7 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         np.testing.assert_equal(selected_groups(), np.zeros(5))
         sel_column[:5] = 1
         np.testing.assert_equal(annotated(), sel_column)
-        self.assertEqual(annotations(), ["No", "Yes"])
+        self.assertEqual(annotations(), ("No", "Yes", ))
 
         # Shift-select 5:10; now we have groups 0:5 and 5:10
         with self.modifiers(Qt.ShiftModifier):
@@ -213,7 +219,7 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         sel_column[15:20] = 1
         np.testing.assert_equal(selectedx(), x[15:20])
         np.testing.assert_equal(selected_groups(), np.zeros(5))
-        self.assertEqual(annotations(), ["No", "Yes"])
+        self.assertEqual(annotations(), ("No", "Yes"))
 
         # Alt-select (remove) 10:17; we have 17:20
         with self.modifiers(Qt.AltModifier):
@@ -222,7 +228,7 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         np.testing.assert_equal(selected_groups(), np.zeros(3))
         sel_column[15:17] = 0
         np.testing.assert_equal(annotated(), sel_column)
-        self.assertEqual(annotations(), ["No", "Yes"])
+        self.assertEqual(annotations(), ("No", "Yes"))
 
         # Ctrl-Shift-select (add-to-last) 10:17; we have 17:25
         with self.modifiers(Qt.ShiftModifier | Qt.ControlModifier):
@@ -231,7 +237,7 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         np.testing.assert_equal(selected_groups(), np.zeros(8))
         sel_column[20:25] = 1
         np.testing.assert_equal(annotated(), sel_column)
-        self.assertEqual(annotations(), ["No", "Yes"])
+        self.assertEqual(annotations(), ("No", "Yes"))
 
         # Shift-select (add) 30:35; we have 17:25, 30:35
         with self.modifiers(Qt.ShiftModifier):
@@ -265,8 +271,8 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         self.assertEqual(len(selected_data), 50)
 
         # Changing the dataset should clear selection
-        heart = Table("heart_disease")
-        self.send_signal(self.widget.Inputs.data, heart)
+        titanic = Table("titanic")
+        self.send_signal(self.widget.Inputs.data, titanic)
         selected_data = self.get_output(self.widget.Outputs.selected_data)
         self.assertIsNone(selected_data)
 
@@ -282,8 +288,9 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
             OWScatterPlot, stored_settings={
                 "selection_group": [(i, 1) for i in range(50)]}
         )
-        data = self.data.copy()[:11]
-        data[0, 0] = np.nan
+        data = self.data[:11].copy()
+        with data.unlocked():
+            data[0, 0] = np.nan
         self.send_signal(self.widget.Inputs.data, data)
         self.assertIsNone(self.get_output(self.widget.Outputs.selected_data))
 
@@ -316,18 +323,31 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         self.send_signal(self.widget.Inputs.features, None)
 
     def test_features_and_data(self):
-        data = Table("iris")
-        self.send_signal(self.widget.Inputs.data, data)
+        self.assertTrue(self.widget.attr_box.isEnabled())
+        self.send_signal(self.widget.Inputs.data, self.data)
         x, y = self.widget.graph.scatterplot_item.getData()
-        np.testing.assert_array_equal(x, data.X[:, 0])
-        np.testing.assert_array_equal(y, data.X[:, 1])
+        np.testing.assert_array_equal(x, self.data.X[:, 0])
+        np.testing.assert_array_equal(y, self.data.X[:, 1])
         self.send_signal(self.widget.Inputs.features,
-                         AttributeList(data.domain[2:]))
-        self.assertIs(self.widget.attr_x, data.domain[2])
-        self.assertIs(self.widget.attr_y, data.domain[3])
+                         AttributeList(self.data.domain[2:]))
+        self.assertIs(self.widget.attr_x, self.data.domain[2])
+        self.assertIs(self.widget.attr_y, self.data.domain[3])
+        self.assertFalse(self.widget.attr_box.isEnabled())
+        self.assertFalse(self.widget.vizrank.isEnabled())
         x, y = self.widget.graph.scatterplot_item.getData()
-        np.testing.assert_array_equal(x, data.X[:, 2])
-        np.testing.assert_array_equal(y, data.X[:, 3])
+        np.testing.assert_array_equal(x, self.data.X[:, 2])
+        np.testing.assert_array_equal(y, self.data.X[:, 3])
+
+        self.send_signal(self.widget.Inputs.data, None)
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.assertIs(self.widget.attr_x, self.data.domain[2])
+        self.assertIs(self.widget.attr_y, self.data.domain[3])
+        self.assertFalse(self.widget.attr_box.isEnabled())
+        self.assertFalse(self.widget.vizrank.isEnabled())
+
+        self.send_signal(self.widget.Inputs.features, None)
+        self.assertTrue(self.widget.attr_box.isEnabled())
+        self.assertTrue(self.widget.vizrank.isEnabled())
 
     def test_output_features(self):
         data = Table("iris")
@@ -375,13 +395,15 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
             self.assertEqual(is_enabled, self.widget.vizrank_button.isEnabled())
 
         data1 = Table("iris")[::30]
-        data2 = Table("iris")[::30]
-        data2.Y[:] = np.nan
+        data2 = Table("iris")[::30].copy()
+        with data2.unlocked():
+            data2.Y[:] = np.nan
         domain = Domain(
-            attributes=data2.domain.attributes[:4], class_vars=DiscreteVariable("iris", values=[]))
+            attributes=data2.domain.attributes[:4], class_vars=DiscreteVariable("iris", values=()))
         data2 = Table(domain, data2.X, Y=data2.Y)
-        data3 = Table("iris")[::30]
-        data3.Y[:] = np.nan
+        data3 = Table("iris")[::30].copy()
+        with data3.unlocked():
+            data3.Y[:] = np.nan
 
         for data, is_enabled in zip([data1, data2, data1, data3, data1],
                                     [True, False, True, False, True]):
@@ -389,11 +411,66 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
 
     def test_vizrank_nonprimitives(self):
         """VizRank does not try to include non primitive attributes"""
-        data = Table("brown-selected")
+        data = Table("zoo")
         self.send_signal(self.widget.Inputs.data, data)
         with patch("Orange.widgets.visualize.owscatterplot.ReliefF",
                    new=lambda *_1, **_2: lambda data: np.arange(len(data))):
             self.widget.vizrank.score_heuristic()
+
+    def test_vizrank_enabled(self):
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.assertTrue(self.widget.vizrank_button.isEnabled())
+        self.assertEqual(self.widget.vizrank_button.toolTip(), "")
+        self.assertTrue(self.widget.vizrank.button.isEnabled())
+        self.widget.vizrank.button.click()
+
+    def test_vizrank_enabled_no_data(self):
+        self.send_signal(self.widget.Inputs.data, None)
+        self.assertFalse(self.widget.vizrank_button.isEnabled())
+        self.assertEqual(self.widget.vizrank_button.toolTip(), "No data on input")
+
+    def test_vizrank_enabled_sparse_data(self):
+        self.send_signal(self.widget.Inputs.data, self.data.to_sparse())
+        self.assertFalse(self.widget.vizrank_button.isEnabled())
+        self.assertEqual(self.widget.vizrank_button.toolTip(), "Data is sparse")
+
+    def test_vizrank_enabled_constant_data(self):
+        domain = Domain([ContinuousVariable("c1"),
+                         ContinuousVariable("c2"),
+                         ContinuousVariable("c3"),
+                         ContinuousVariable("c4")],
+                        DiscreteVariable("cls", values=("a", "b")))
+        X = np.zeros((10, 4))
+        table = Table(domain, X, np.random.randint(2, size=10))
+        self.send_signal(self.widget.Inputs.data, table)
+        self.assertEqual(self.widget.vizrank_button.toolTip(), "")
+        self.assertTrue(self.widget.vizrank_button.isEnabled())
+        self.assertTrue(self.widget.vizrank.button.isEnabled())
+        self.widget.vizrank.button.click()
+
+    def test_vizrank_enabled_two_features(self):
+        self.send_signal(self.widget.Inputs.data, self.data[:, :2])
+        self.assertFalse(self.widget.vizrank_button.isEnabled())
+        self.assertEqual(self.widget.vizrank_button.toolTip(),
+                         "Not enough features for ranking")
+
+    def test_vizrank_enabled_no_color_var(self):
+        self.send_signal(self.widget.Inputs.data, self.data[:, :3])
+        self.assertFalse(self.widget.vizrank_button.isEnabled())
+        self.assertEqual(self.widget.vizrank_button.toolTip(),
+                         "Color variable is not selected")
+
+    def test_vizrank_enabled_color_var_nans(self):
+        domain = Domain([ContinuousVariable("c1"),
+                         ContinuousVariable("c2"),
+                         ContinuousVariable("c3"),
+                         ContinuousVariable("c4")],
+                        DiscreteVariable("cls", values=("a", "b")))
+        table = Table(domain, np.random.random((10, 4)), np.full(10, np.nan))
+        self.send_signal(self.widget.Inputs.data, table)
+        self.assertFalse(self.widget.vizrank_button.isEnabled())
+        self.assertEqual(self.widget.vizrank_button.toolTip(),
+                         "Color variable has no values")
 
     def test_auto_send_selection(self):
         """
@@ -413,56 +490,56 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         self.assertIsInstance(output, Table)
 
     def test_color_is_optional(self):
-        heart = Table("heart_disease")
-        age, rest_sbp, max_hr, cholesterol, gender, narrowing = \
-            [heart.domain[x]
-             for x in ["age", "rest SBP", "max HR", "cholesterol", "gender",
-                       "diameter narrowing"]]
+        zoo = Table("zoo")
+        backbone, breathes, airborne, type = \
+            [zoo.domain[x] for x in ["backbone", "breathes", "airborne", "type"]]
+        default_x, default_y, default_color = \
+            zoo.domain[0], zoo.domain[1], zoo.domain.class_var
         attr_x = self.widget.controls.attr_x
         attr_y = self.widget.controls.attr_y
         attr_color = self.widget.controls.attr_color
 
         # Send dataset, ensure defaults are what we expect them to be
-        self.send_signal(self.widget.Inputs.data, heart)
-        self.assertEqual(attr_x.currentText(), age.name)
-        self.assertEqual(attr_y.currentText(), rest_sbp.name)
-        self.assertEqual(attr_color.currentText(), narrowing.name)
+        self.send_signal(self.widget.Inputs.data, zoo)
+        self.assertEqual(attr_x.currentText(), default_x.name)
+        self.assertEqual(attr_y.currentText(), default_y.name)
+        self.assertEqual(attr_color.currentText(), default_color.name)
         # Select different values
-        simulate.combobox_activate_item(attr_x, max_hr.name)
-        simulate.combobox_activate_item(attr_y, cholesterol.name)
-        simulate.combobox_activate_item(attr_color, gender.name)
+        simulate.combobox_activate_item(attr_x, backbone.name)
+        simulate.combobox_activate_item(attr_y, breathes.name)
+        simulate.combobox_activate_item(attr_color, airborne.name)
 
         # Send compatible dataset, values should not change
-        heart2 = heart[:, (cholesterol, gender, max_hr, narrowing)]
-        self.send_signal(self.widget.Inputs.data, heart2)
-        simulate.combobox_activate_item(attr_x, max_hr.name)
-        simulate.combobox_activate_item(attr_y, cholesterol.name)
-        simulate.combobox_activate_item(attr_color, gender.name)
+        zoo2 = zoo[:, (backbone, breathes, airborne, type)]
+        self.send_signal(self.widget.Inputs.data, zoo2)
+        self.assertEqual(attr_x.currentText(), backbone.name)
+        self.assertEqual(attr_y.currentText(), breathes.name)
+        self.assertEqual(attr_color.currentText(), airborne.name)
 
         # Send dataset without color variable
         # x and y should remain, color reset to default
-        heart3 = heart[:, (age, max_hr, cholesterol, narrowing)]
-        self.send_signal(self.widget.Inputs.data, heart3)
-        simulate.combobox_activate_item(attr_x, max_hr.name)
-        simulate.combobox_activate_item(attr_y, cholesterol.name)
-        self.assertEqual(attr_color.currentText(), narrowing.name)
+        zoo3 = zoo[:, (backbone, breathes, type)]
+        self.send_signal(self.widget.Inputs.data, zoo3)
+        self.assertEqual(attr_x.currentText(), backbone.name)
+        self.assertEqual(attr_y.currentText(), breathes.name)
+        self.assertEqual(attr_color.currentText(), default_color.name)
 
         # Send dataset without x
-        # y and color should be the same as with heart
-        heart4 = heart[:, (age, rest_sbp, cholesterol, narrowing)]
-        self.send_signal(self.widget.Inputs.data, heart4)
-        self.assertEqual(attr_x.currentText(), age.name)
-        self.assertEqual(attr_y.currentText(), rest_sbp.name)
-        self.assertEqual(attr_color.currentText(), narrowing.name)
+        # y and color should be the same as with zoo
+        zoo4 = zoo[:, (default_x, default_y, breathes, airborne, type)]
+        self.send_signal(self.widget.Inputs.data, zoo4)
+        self.assertEqual(attr_x.currentText(), default_x.name)
+        self.assertEqual(attr_y.currentText(), default_y.name)
+        self.assertEqual(attr_color.currentText(), default_color.name)
 
-        # Send dataset compatible with heart2 and heart3
-        # Color should reset to one in heart3, as it was used more
+        # Send dataset compatible with zoo2 and zoo3
+        # Color should reset to one in zoo3, as it was used more
         # recently
-        heart5 = heart[:, (age, max_hr, cholesterol, gender, narrowing)]
-        self.send_signal(self.widget.Inputs.data, heart5)
-        simulate.combobox_activate_item(attr_x, max_hr.name)
-        simulate.combobox_activate_item(attr_y, cholesterol.name)
-        self.assertEqual(attr_color.currentText(), narrowing.name)
+        zoo5 = zoo[:, (default_x, backbone, breathes, airborne, type)]
+        self.send_signal(self.widget.Inputs.data, zoo5)
+        self.assertEqual(attr_x.currentText(), backbone.name)
+        self.assertEqual(attr_y.currentText(), breathes.name)
+        self.assertEqual(attr_color.currentText(), type.name)
 
     def test_handle_metas(self):
         """
@@ -476,9 +553,10 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
             class_vars=data.domain.class_vars,
             metas=data.domain.attributes[2:]
         )
-        data = data.transform(domain)
+        data = data.transform(domain).copy()
         # Sometimes floats in metas are saved as objects
-        data.metas = data.metas.astype(object)
+        with data.unlocked():
+            data.metas = data.metas.astype(object)
         self.send_signal(w.Inputs.data, data)
         simulate.combobox_activate_item(w.cb_attr_x, data.domain.metas[1].name)
         simulate.combobox_activate_item(w.controls.attr_color, data.domain.metas[0].name)
@@ -495,6 +573,26 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         self.send_signal(w.Inputs.data_subset, data[::30])
         self.assertEqual(len(w.subset_indices), 5)
 
+    def test_opacity_warning(self):
+        data = Table("iris")
+        w = self.widget
+        self.send_signal(w.Inputs.data, data)
+        w.graph.controls.alpha_value.setSliderPosition(10)
+        self.assertFalse(w.Warning.transparent_subset.is_shown())
+        self.send_signal(w.Inputs.data_subset, data[::30])
+        self.assertTrue(w.Warning.transparent_subset.is_shown())
+        w.graph.controls.alpha_value.setSliderPosition(200)
+        self.assertFalse(w.Warning.transparent_subset.is_shown())
+        w.graph.controls.alpha_value.setSliderPosition(10)
+        self.assertTrue(w.Warning.transparent_subset.is_shown())
+        self.send_signal(w.Inputs.data_subset, None)
+        self.assertFalse(w.Warning.transparent_subset.is_shown())
+
+    def test_jittering(self):
+        self.send_signal(self.widget.Inputs.data, self.data)
+        self.widget.graph.controls.jitter_continuous.setChecked(True)
+        self.widget.graph.controls.jitter_size.setValue(1)
+
     def test_metas_zero_column(self):
         """
         Prevent crash when metas column is zero.
@@ -503,8 +601,9 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         data = Table("iris")
         domain = data.domain
         domain = Domain(domain.attributes[:3], domain.class_vars, domain.attributes[3:])
-        data = data.transform(domain)
-        data.metas[:, 0] = 0
+        data = data.transform(domain).copy()
+        with data.unlocked():
+            data.metas[:, 0] = 0
         w = self.widget
         self.send_signal(w.Inputs.data, data)
         simulate.combobox_activate_item(w.controls.attr_x, domain.metas[0].name)
@@ -516,10 +615,10 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         self.send_signal(self.widget.Inputs.data, data)
         widget = self.widget
         graph = widget.graph
-
-        widget.attr_x = data.domain["age"]
-        widget.attr_y = data.domain["max HR"]
         scatterplot_item = graph.scatterplot_item
+
+        widget.controls.attr_x = data.domain["chest pain"]
+        widget.controls.attr_y = data.domain["cholesterol"]
         all_points = scatterplot_item.points()
 
         event = MagicMock()
@@ -534,8 +633,8 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
                 self.assertTrue(graph.help_event(event))
                 (_, text), _ = show_text.call_args
                 self.assertIn("age = {}".format(data[42, "age"]), text)
-                self.assertIn("max HR = {}".format(data[42, "max HR"]), text)
-                self.assertNotIn("gender = {}".format(data[42, "gender"]), text)
+                self.assertIn("gender = {}".format(data[42, "gender"]), text)
+                self.assertNotIn("max HR = {}".format(data[42, "max HR"]), text)
                 self.assertNotIn("others", text)
 
                 # Show all attributes
@@ -574,32 +673,24 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
             data = Table("iris")
             values = list(range(15))
             class_var = DiscreteVariable("iris5", values=[str(v) for v in values])
-            data = data.transform(Domain(attributes=data.domain.attributes, class_vars=[class_var]))
-            data.Y = np.array(values * 10, dtype=float)
+            data = data.transform(
+                Domain(attributes=data.domain.attributes,
+                       class_vars=[class_var])).copy()
+            with data.unlocked():
+                data.Y = np.array(values * 10, dtype=float)
             return data
 
         def assert_equal(data, max):
             self.send_signal(self.widget.Inputs.data, data)
-            pen_data, _ = self.widget.graph.get_colors()
+            pen_data, brush_data = self.widget.graph.get_colors()
             self.assertEqual(max, len(np.unique([id(p) for p in pen_data])), )
 
-        assert_equal(prepare_data(), MAX_CATEGORIES)
+        assert_equal(prepare_data(), MAX_COLORS)
         # data with nan value
         data = prepare_data()
-        data.Y[42] = np.nan
-        assert_equal(data, MAX_CATEGORIES + 1)
-
-    def test_change_data(self):
-        self.send_signal(self.widget.Inputs.data, self.data)
-        self.send_signal(self.widget.Inputs.data, Table("titanic"))
-        self.assertTrue(self.widget.Warning.no_continuous_vars.is_shown())
-        self.assertIsNone(self.widget.data)
-        self.assertIsNone(self.get_output(self.widget.Outputs.annotated_data))
-        self.send_signal(self.widget.Inputs.data, self.data)
-        self.assertFalse(self.widget.Warning.no_continuous_vars.is_shown())
-        self.assertIs(self.widget.data, self.data)
-        self.assertIsNotNone(
-            self.get_output(self.widget.Outputs.annotated_data))
+        with data.unlocked():
+            data.Y[42] = np.nan
+        assert_equal(data, MAX_COLORS + 1)
 
     def test_invalidated_same_features(self):
         self.widget.setup_plot = Mock()
@@ -632,7 +723,7 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         # send features (same as default ones)
         self.send_signal(self.widget.Inputs.features,
                          AttributeList(self.data.domain.attributes[:2]))
-        self.assertListEqual(self.widget.effective_variables, [None, None])
+        self.assertListEqual(self.widget.effective_variables, [])
         self.widget.setup_plot.assert_called_once()
 
         # send data
@@ -683,7 +774,7 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         # send features (not the same as defaults)
         self.send_signal(self.widget.Inputs.features,
                          AttributeList(self.data.domain.attributes[2:4]))
-        self.assertListEqual(self.widget.effective_variables, [None, None])
+        self.assertListEqual(self.widget.effective_variables, [])
         self.widget.setup_plot.assert_called_once()
 
         # send data
@@ -735,12 +826,342 @@ class TestOWScatterPlot(WidgetTest, ProjectionWidgetTestMixin,
         selection = vizrank.rank_table.selectedIndexes()
         self.assertEqual(len(selection), 0)
 
-    def test_regression_line(self):
+    def test_regression_lines_appear(self):
         self.widget.graph.controls.show_reg_line.setChecked(True)
+        self.assertEqual(len(self.widget.graph.reg_line_items), 0)
         self.send_signal(self.widget.Inputs.data, self.data)
+        self.assertEqual(len(self.widget.graph.reg_line_items), 4)
+        simulate.combobox_activate_index(self.widget.controls.attr_color, 0)
+        self.assertEqual(len(self.widget.graph.reg_line_items), 1)
         data = self.data.copy()
-        data[:, 0] = np.nan
+        with data.unlocked():
+            data[:, 0] = np.nan
         self.send_signal(self.widget.Inputs.data, data)
+        self.assertEqual(len(self.widget.graph.reg_line_items), 0)
+
+    def test_regression_line_coeffs(self):
+        widget = self.widget
+        graph = widget.graph
+        xy = np.array([[0, 0], [1, 0], [1, 2], [2, 2],
+                       [0, 1], [1, 3], [2, 5]], dtype=float)
+        colors = np.array([0, 0, 0, 0, 1, 1, 1], dtype=float)
+        widget.get_coordinates_data = lambda: xy.T
+        widget.can_draw_regresssion_line = lambda: True
+        widget.get_color_data = lambda: colors
+        widget.is_continuous_color = lambda: False
+        graph.palette = DefaultRGBColors
+        graph.controls.show_reg_line.setChecked(True)
+
+        graph.update_regression_line()
+
+        line1 = graph.reg_line_items[1]
+        self.assertEqual(line1.pos().x(), 0)
+        self.assertEqual(line1.pos().y(), 0)
+        self.assertEqual(line1.angle, 45)
+        self.assertEqual(line1.pen.color().hue(), graph.palette[0].hue())
+
+        line2 = graph.reg_line_items[2]
+        self.assertEqual(line2.pos().x(), 0)
+        self.assertEqual(line2.pos().y(), 1)
+        self.assertAlmostEqual(line2.angle, np.degrees(np.arctan2(2, 1)))
+        self.assertEqual(line2.pen.color().hue(), graph.palette[1].hue())
+
+        graph.orthonormal_regression = True
+        graph.update_regression_line()
+
+        line1 = graph.reg_line_items[1]
+        self.assertEqual(line1.pos().x(), 0)
+        self.assertAlmostEqual(line1.pos().y(), -0.6180339887498949)
+        self.assertAlmostEqual(line1.angle, 58.28252558853899)
+        self.assertEqual(line1.pen.color().hue(), graph.palette[0].hue())
+
+        line2 = graph.reg_line_items[2]
+        self.assertEqual(line2.pos().x(), 0)
+        self.assertEqual(line2.pos().y(), 1)
+        self.assertAlmostEqual(line2.angle, np.degrees(np.arctan2(2, 1)))
+        self.assertEqual(line2.pen.color().hue(), graph.palette[1].hue())
+
+    def test_orthonormal_line(self):
+        color = QColor(1, 2, 3)
+        width = 42
+        # Normal line
+        line = OWScatterPlotGraph._orthonormal_line(
+            np.array([0, 1, 1, 2]), np.array([0, 0, 2, 2]), color, width)
+        self.assertEqual(line.pos().x(), 0)
+        self.assertAlmostEqual(line.pos().y(), -0.6180339887498949)
+        self.assertAlmostEqual(line.angle, 58.28252558853899)
+        self.assertEqual(line.pen.color(), color)
+        self.assertEqual(line.pen.width(), width)
+
+        # Normal line, negative slope
+        line = OWScatterPlotGraph._orthonormal_line(
+            np.array([1, 2, 3]), np.array([3, 2, 1]), color, width)
+        self.assertEqual(line.pos().x(), 1)
+        self.assertEqual(line.pos().y(), 3)
+        self.assertEqual(line.angle % 360, 315)
+
+        # Horizontal line
+        line = OWScatterPlotGraph._orthonormal_line(
+            np.array([10, 11, 12]), np.array([42, 42, 42]), color, width)
+        self.assertEqual(line.pos().x(), 10)
+        self.assertEqual(line.pos().y(), 42)
+        self.assertEqual(line.angle, 0)
+
+        # Vertical line
+        line = OWScatterPlotGraph._orthonormal_line(
+            np.array([42, 42, 42]), np.array([10, 11, 12]), color, width)
+        self.assertEqual(line.pos().x(), 42)
+        self.assertEqual(line.pos().y(), 10)
+        self.assertEqual(line.angle, 90)
+
+        # No line because all points coincide
+        line = OWScatterPlotGraph._orthonormal_line(
+            np.array([1, 1, 1]), np.array([42, 42, 42]), color, width)
+        self.assertIsNone(line)
+
+        # No line because the group is symmetric
+        line = OWScatterPlotGraph._orthonormal_line(
+            np.array([1, 1, 2, 2]), np.array([42, 5, 5, 42]), color, width)
+        self.assertIsNone(line)
+
+    def test_regression_line(self):
+        color = QColor(1, 2, 3)
+        width = 42
+        # Normal line
+        line = OWScatterPlotGraph._regression_line(
+            np.array([0, 1, 1, 2]), np.array([0, 0, 2, 2]), color, width)
+        self.assertEqual(line.pos().x(), 0)
+        self.assertAlmostEqual(line.pos().y(), 0)
+        self.assertEqual(line.angle, 45)
+        self.assertEqual(line.pen.color(), color)
+        self.assertEqual(line.pen.width(), width)
+
+        # Normal line, negative slope
+        line = OWScatterPlotGraph._regression_line(
+            np.array([1, 2, 3]), np.array([3, 2, 1]), color, width)
+        self.assertEqual(line.pos().x(), 1)
+        self.assertEqual(line.pos().y(), 3)
+        self.assertEqual(line.angle % 360, 315)
+
+        # Horizontal line
+        line = OWScatterPlotGraph._regression_line(
+            np.array([10, 11, 12]), np.array([42, 42, 42]), color, width)
+        self.assertEqual(line.pos().x(), 10)
+        self.assertEqual(line.pos().y(), 42)
+        self.assertEqual(line.angle, 0)
+
+        # Vertical line
+        line = OWScatterPlotGraph._regression_line(
+            np.array([42, 42, 42]), np.array([10, 11, 12]), color, width)
+        self.assertIsNone(line)
+
+        # No line because all points coincide
+        line = OWScatterPlotGraph._regression_line(
+            np.array([1, 1, 1]), np.array([42, 42, 42]), color, width)
+        self.assertIsNone(line)
+
+    def test_add_line_calls_proper_regressor(self):
+        graph = self.widget.graph
+        graph._orthonormal_line = Mock(return_value=None)
+        graph._regression_line = Mock(return_value=None)
+        x, y, c = Mock(), Mock(), Mock()
+
+        graph.orthonormal_regression = True
+        graph._add_line(x, y, c)
+        graph._orthonormal_line.assert_called_once_with(x, y, c, 3, 1)
+        graph._regression_line.assert_not_called()
+        graph._orthonormal_line.reset_mock()
+
+        graph.orthonormal_regression = False
+        graph._add_line(x, y, c)
+        graph._regression_line.assert_called_with(x, y, c, 3, 1)
+        graph._orthonormal_line.assert_not_called()
+
+    def test_no_regression_line(self):
+        graph = self.widget.graph
+        graph._orthonormal_line = lambda *_: None
+        graph.orthonormal_regression = True
+
+        graph.plot_widget.addItem = Mock()
+
+        x, y, c = Mock(), Mock(), Mock()
+        graph._add_line(x, y, c)
+        graph.plot_widget.addItem.assert_not_called()
+        self.assertEqual(graph.reg_line_items, [])
+
+    def test_update_regression_line_calls_add_line(self):
+        widget = self.widget
+        graph = widget.graph
+        x, y = np.array([[0, 0], [1, 0], [1, 2], [2, 2],
+                         [0, 1], [1, 3], [2, 5]], dtype=float).T
+        colors = np.array([0, 0, 0, 0, 1, 1, 1], dtype=float)
+        widget.get_coordinates_data = lambda: (x, y)
+        widget.can_draw_regresssion_line = lambda: True
+        widget.get_color_data = lambda: colors
+        widget.is_continuous_color = lambda: False
+        graph.palette = DefaultRGBColors
+        graph.controls.show_reg_line.setChecked(True)
+
+        graph._add_line = Mock()
+
+        graph.update_regression_line()
+        (args1, _), (args2, _), (args3, _) = graph._add_line.call_args_list
+        np.testing.assert_equal(args1[0], x)
+        np.testing.assert_equal(args1[1], y)
+        self.assertEqual(args1[2], QColor("#505050"))
+
+        np.testing.assert_equal(args2[0], x[:4])
+        np.testing.assert_equal(args2[1], y[:4])
+        self.assertEqual(args2[2].hue(), graph.palette[0].hue())
+
+        np.testing.assert_equal(args3[0], x[4:])
+        np.testing.assert_equal(args3[1], y[4:])
+        self.assertEqual(args3[2].hue(), graph.palette[1].hue())
+        graph._add_line.reset_mock()
+
+        # Continuous color - just a single line
+        widget.is_continuous_color = lambda: True
+        graph.update_regression_line()
+        graph._add_line.assert_called_once()
+        args1, _ = graph._add_line.call_args_list[0]
+        np.testing.assert_equal(args1[0], x)
+        np.testing.assert_equal(args1[1], y)
+        self.assertEqual(args1[2].hue(), QColor("#505050").hue())
+        graph._add_line.reset_mock()
+        widget.is_continuous_color = lambda: False
+
+        # No palette - just a single line
+        graph.palette = None
+        graph.update_regression_line()
+        graph._add_line.assert_called_once()
+        graph._add_line.reset_mock()
+        graph.palette = DefaultRGBColors
+
+        # Regression line is disabled
+        graph.show_reg_line = False
+        graph.update_regression_line()
+        graph._add_line.assert_not_called()
+        graph.show_reg_line = True
+
+        # No colors - just one line
+        widget.get_color_data = lambda: None
+        graph.update_regression_line()
+        graph._add_line.assert_called_once()
+        graph._add_line.reset_mock()
+
+        # No data
+        widget.get_coordinates_data = lambda: (None, None)
+        graph.update_regression_line()
+        graph._add_line.assert_not_called()
+        graph.show_reg_line = True
+        widget.get_coordinates_data = lambda: (x, y)
+
+        # One color group contains just one point - skip that line
+        widget.get_color_data = lambda: np.array([0] + [1] * (len(x) - 1))
+
+        graph.update_regression_line()
+        (args1, _), (args2, _) = graph._add_line.call_args_list
+        np.testing.assert_equal(args1[0], x)
+        np.testing.assert_equal(args1[1], y)
+        self.assertEqual(args1[2].hue(), QColor("#505050").hue())
+
+        np.testing.assert_equal(args2[0], x[1:])
+        np.testing.assert_equal(args2[1], y[1:])
+        self.assertEqual(args2[2].hue(), graph.palette[1].hue())
+
+    def test_update_regression_line_is_called(self):
+        widget = self.widget
+        graph = widget.graph
+        urline = graph.update_regression_line = Mock()
+
+        self.send_signal(widget.Inputs.data, self.data)
+        urline.assert_called_once()
+        urline.reset_mock()
+
+        self.send_signal(widget.Inputs.data, None)
+        urline.assert_called_once()
+        urline.reset_mock()
+
+        self.send_signal(widget.Inputs.data, self.data)
+        urline.assert_called_once()
+        urline.reset_mock()
+
+        simulate.combobox_activate_index(self.widget.controls.attr_color, 0)
+        urline.assert_called_once()
+        urline.reset_mock()
+
+        simulate.combobox_activate_index(self.widget.controls.attr_color, 2)
+        urline.assert_called_once()
+        urline.reset_mock()
+
+        simulate.combobox_activate_index(self.widget.controls.attr_x, 3)
+        urline.assert_called_once()
+        urline.reset_mock()
+
+    def test_time_axis(self):
+        a = np.array([[1581953776, 1], [1581963776, 2], [1582953776, 3]])
+        d1 = Domain([ContinuousVariable("time"), ContinuousVariable("value")])
+        data = Table.from_numpy(d1, a)
+        d2 = Domain([TimeVariable("time"), ContinuousVariable("value")])
+        data_time = Table.from_numpy(d2, a)
+
+        x_axis = self.widget.graph.plot_widget.plotItem.getAxis("bottom")
+
+        self.send_signal(self.widget.Inputs.data, data)
+        self.assertFalse(x_axis._use_time)
+        _ticks = x_axis.tickValues(1581953776, 1582953776, 1000)
+        ticks = x_axis.tickStrings(_ticks[0][1], 1, _ticks[0][0])
+        try:
+            float(ticks[0])
+        except ValueError:
+            self.fail("axis should display floats")
+
+        self.send_signal(self.widget.Inputs.data, data_time)
+        self.assertTrue(x_axis._use_time)
+        _ticks = x_axis.tickValues(1581953776, 1582953776, 1000)
+        ticks = x_axis.tickStrings(_ticks[0][1], 1, _ticks[0][0])
+        with self.assertRaises(ValueError):
+            float(ticks[0])
+
+    def test_visual_settings(self):
+        super().test_visual_settings()
+
+        graph = self.widget.graph
+        font = QFont()
+        font.setItalic(True)
+        font.setFamily("Helvetica")
+
+        key, value = ('Fonts', 'Axis title', 'Font size'), 16
+        self.widget.set_visual_settings(key, value)
+        key, value = ('Fonts', 'Axis title', 'Italic'), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(16)
+        for item in graph.parameter_setter.axis_items:
+            self.assertFontEqual(item.label.font(), font)
+
+        key, value = ('Fonts', 'Axis ticks', 'Font size'), 15
+        self.widget.set_visual_settings(key, value)
+        key, value = ('Fonts', 'Axis ticks', 'Italic'), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(15)
+        for item in graph.parameter_setter.axis_items:
+            self.assertFontEqual(item.style["tickFont"], font)
+
+        self.widget.graph.controls.show_reg_line.setChecked(True)
+        self.assertGreater(len(graph.parameter_setter.reg_line_label_items), 0)
+
+        key, value = ('Fonts', 'Line label', 'Font size'), 16
+        self.widget.set_visual_settings(key, value)
+        key, value = ('Fonts', 'Line label', 'Italic'), True
+        self.widget.set_visual_settings(key, value)
+        font.setPointSize(16)
+        for label in graph.parameter_setter.reg_line_label_items:
+            self.assertFontEqual(label.textItem.font(), font)
+
+        key, value = ('Figure', 'Lines', 'Width'), 10
+        self.widget.set_visual_settings(key, value)
+        for item in graph.reg_line_items:
+            self.assertEqual(item.pen.width(), 10)
 
 
 if __name__ == "__main__":

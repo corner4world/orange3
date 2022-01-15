@@ -1,12 +1,17 @@
 """Various small utilities that might be useful everywhere"""
+import logging
 import os
 import inspect
+import datetime
+from contextlib import contextmanager
+
+import pkg_resources
 from enum import Enum as _Enum
 from functools import wraps, partial
 from operator import attrgetter
 from itertools import chain, count, repeat
 
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 import warnings
 
 # Exposed here for convenience. Prefer patching to try-finally blocks
@@ -14,6 +19,9 @@ from unittest.mock import patch  # pylint: disable=unused-import
 
 # Backwards-compat
 from Orange.data.util import scale  # pylint: disable=unused-import
+
+
+log = logging.getLogger(__name__)
 
 
 class OrangeWarning(UserWarning):
@@ -28,6 +36,89 @@ warnings.simplefilter('default', OrangeWarning)
 
 if os.environ.get('ORANGE_DEPRECATIONS_ERROR'):
     warnings.simplefilter('error', OrangeDeprecationWarning)
+
+
+def _log_warning(msg):
+    """
+    Replacement for `warnings._showwarnmsg_impl` that logs the warning
+    Logs the warning in the appropriate list, or passes it to the original
+    function if the warning wasn't issued within the log_warnings context.
+    """
+    for frame in inspect.stack():
+        if frame.frame in warning_loggers:
+            warning_loggers[frame.frame].append(msg)
+            break
+    else:
+        __orig_showwarnmsg_impl(msg)
+
+
+@contextmanager
+def log_warnings():
+    """
+    logs all warnings that occur within context, including warnings from calls.
+
+    ```python
+    with log_warnings() as warnings:
+       ...
+    ```
+
+    Unlike `warnings.catch_warnings(record=True)`, this manager is thread-safe
+    and will only log warning from this thread. It does so by storing the
+    stack frame within which the context is created, and then checking the
+    stack when the warning is issued.
+
+    Nesting of `log_warnings` within the same function will raise an error.
+    If `log_wanings` are nested within function calls, the warning is logged
+    in the inner-most context.
+
+    If `catch_warnings` is used within the `log_warnings` context, logging is
+    disabled until the `catch_warnings` exits. This looks inevitable (without
+    patching `catch_warnings`, which I'd prefer not to do).
+
+    If `catch_warnings` is used outside this context, everything, including
+    warning filtering, should work as expected.
+
+    Note: the method imitates `catch_warnings` by patching the `warnings`
+    module's internal function `_showwarnmsg_impl`. Python (as of version 3.9)
+    doesn't seem to offer any other way of catching the warnings. This function
+    was introduced in Python 3.6, so we cover all supported versions. If it is
+    ever removed, unittests will crash, so we'll know. :)
+    """
+    # currentframe().f_back is `contextmanager`'s __enter__
+    frame = inspect.currentframe().f_back.f_back
+    if frame in warning_loggers:
+        raise ValueError("nested log_warnings")
+    try:
+        warning_loggers[frame] = []
+        yield warning_loggers[frame]
+    finally:
+        del warning_loggers[frame]
+
+
+# pylint: disable=protected-access
+warning_loggers = {}
+__orig_showwarnmsg_impl = warnings._showwarnmsg_impl
+warnings._showwarnmsg_impl = _log_warning
+
+
+def resource_filename(path):
+    """
+    Return the resource filename path relative to the Orange package.
+    """
+    return pkg_resources.resource_filename("Orange", path)
+
+
+def get_entry_point(dist, group, name):
+    """
+    Load and return the entry point from the distribution.
+
+    Unlike `pkg_resources.load_entry_point`, this function does not check
+    for requirements. Calling this function is preferred because of developers
+    who experiment with different versions and have inconsistent configurations.
+    """
+    dist = pkg_resources.get_distribution(dist)
+    ep = dist.get_entry_info(group, name)
+    return ep.resolve()
 
 
 def deprecated(obj):
@@ -82,11 +173,82 @@ def deprecated(obj):
     return decorator if alternative else decorator(obj)
 
 
+def literal_eval(literal):
+    import ast
+    # ast.literal_eval does not parse empty set ¯\_(ツ)_/¯
+
+    if literal == "set()":
+        return set()
+    return ast.literal_eval(literal)
+
+
+op_map = {
+    '==': lambda a, b: a == b,
+    '>=': lambda a, b: a >= b,
+    '<=': lambda a, b: a <= b,
+    '>': lambda a, b: a > b,
+    '<': lambda a, b: a < b
+}
+
+
+_Requirement = namedtuple("_Requirement", ["name", "op", "value"])
+
+
+bool_map = {
+    "True": True,
+    "true": True,
+    1: True,
+    "False": False,
+    "false": False,
+    0: False
+}
+
+
+def requirementsSatisfied(required_state, local_state, req_type=None):
+    """
+    Checks a list of requirements against a dictionary representing local state.
+
+    Args:
+        required_state ([str]): List of strings representing required state
+                                using comparison operators
+        local_state (dict): Dictionary representing current state
+        req_type (type): Casts values to req_type before comparing them.
+                         Defaults to local_state type.
+    """
+    for req_string in required_state:
+        # parse requirement
+        req = None
+        for op_str in op_map:
+            split = req_string.split(op_str)
+            # if operation is not in req_string, continue
+            if len(split) == 2:
+                req = _Requirement(split[0], op_map[op_str], split[1])
+                break
+
+        if req is None:
+            log.error("Invalid requirement specification: %s", req_string)
+            return False
+
+        compare_type = req_type or type(local_state[req.name])
+        # check if local state satisfies required state (specification)
+        if compare_type is bool:
+            # boolean is a special case, where simply casting to bool does not produce target result
+            required_value = bool_map[req.value]
+        else:
+            required_value = compare_type(req.value)
+        local_value = compare_type(local_state[req.name])
+
+        # finally, compare the values
+        if not req.op(local_value, required_value):
+            return False
+    return True
+
+
 def try_(func, default=None):
     """Try return the result of func, else return default."""
     try:
         return func()
-    except Exception:
+    except Exception:  # pylint: disable=broad-except
         return default
 
 
@@ -301,13 +463,18 @@ class Reprable:
             return False
 
     def _reprable_items(self):
-        for name, default in self._reprable_fields():
-            try:
-                value = getattr(self, name)
-            except AttributeError:
-                value = _undef
-            if not self._reprable_omit_param(name, default, value):
-                yield name, default, value
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            warnings.simplefilter("error", PendingDeprecationWarning)
+            for name, default in self._reprable_fields():
+                try:
+                    value = getattr(self, name)
+                except (DeprecationWarning, PendingDeprecationWarning):
+                    continue
+                except AttributeError:
+                    value = _undef
+                if not self._reprable_omit_param(name, default, value):
+                    yield name, default, value
 
     def _repr_pretty_(self, p, cycle):
         """IPython pretty print hook."""
@@ -332,6 +499,37 @@ class Reprable:
         return "{}({})".format(
             name, ", ".join("{}={!r}".format(f, v) for f, _, v in self._reprable_items())
         )
+
+
+def wrap_callback(progress_callback, start=0, end=1):
+    """
+    Wraps a progress callback function to allocate it end-start proportion
+    of an execution time.
+
+    :param progress_callback: callable
+    :param start: float
+    :param end: float
+    :return: callable
+    """
+    @wraps(progress_callback)
+    def func(progress, *args, **kwargs):
+        adjusted_progress = start + progress * (end - start)
+        return progress_callback(adjusted_progress, *args, **kwargs)
+    return func
+
+
+def dummy_callback(*_, **__):
+    """ A dummy callable. """
+    return 1
+
+
+def utc_from_timestamp(timestamp) -> datetime.datetime:
+    """
+    Return the UTC datetime corresponding to the POSIX timestamp.
+    """
+    return datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc) + \
+           datetime.timedelta(seconds=float(timestamp))
+
 
 # For best result, keep this at the bottom
 __all__ = export_globals(globals(), __name__)

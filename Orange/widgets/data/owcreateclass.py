@@ -4,7 +4,7 @@ from itertools import count
 
 import numpy as np
 
-from AnyQt.QtWidgets import QGridLayout, QLabel, QLineEdit, QSizePolicy
+from AnyQt.QtWidgets import QGridLayout, QLabel, QLineEdit, QSizePolicy, QWidget
 from AnyQt.QtCore import QSize, Qt
 
 from Orange.data import StringVariable, DiscreteVariable, Domain
@@ -18,20 +18,27 @@ from Orange.widgets.utils.widgetpreview import WidgetPreview
 from Orange.widgets.widget import Msg, Input, Output
 
 
-def map_by_substring(a, patterns, case_sensitive, match_beginning):
+def map_by_substring(a, patterns, case_sensitive, match_beginning,
+                     map_values=None):
     """
     Map values in a using a list of patterns. The patterns are considered in
     order of appearance.
 
     Args:
         a (np.array): input array of `dtype` `str`
-        patterns (list of str): list of stirngs
+        patterns (list of str): list of strings
         case_sensitive (bool): case sensitive match
         match_beginning (bool): match only at the beginning of the string
+        map_values (list of int): list of len(pattens);
+                                  contains return values for each pattern
 
     Returns:
         np.array of floats representing indices of matched patterns
     """
+    if map_values is None:
+        map_values = np.arange(len(patterns))
+    else:
+        map_values = np.array(map_values, dtype=int)
     res = np.full(len(a), np.nan)
     if not case_sensitive:
         a = np.char.lower(a)
@@ -39,7 +46,7 @@ def map_by_substring(a, patterns, case_sensitive, match_beginning):
     for val_idx, pattern in reversed(list(enumerate(patterns))):
         indices = np.char.find(a, pattern)
         matches = indices == 0 if match_beginning else indices != -1
-        res[matches] = val_idx
+        res[matches] = map_values[val_idx]
     return res
 
 
@@ -61,11 +68,12 @@ class ValueFromStringSubstring(Transformation):
             appear at the beginning of the string
     """
     def __init__(self, variable, patterns,
-                 case_sensitive=False, match_beginning=False):
+                 case_sensitive=False, match_beginning=False, map_values=None):
         super().__init__(variable)
         self.patterns = patterns
         self.case_sensitive = case_sensitive
         self.match_beginning = match_beginning
+        self.map_values = map_values
 
     def transform(self, c):
         """
@@ -81,9 +89,23 @@ class ValueFromStringSubstring(Transformation):
         c = c.astype(str)
         c[nans] = ""
         res = map_by_substring(
-            c, self.patterns, self.case_sensitive, self.match_beginning)
+            c, self.patterns, self.case_sensitive, self.match_beginning,
+            self.map_values)
         res[nans] = np.nan
         return res
+
+    def __eq__(self, other):
+        return super().__eq__(other) \
+               and self.patterns == other.patterns \
+               and self.case_sensitive == other.case_sensitive \
+               and self.match_beginning == other.match_beginning \
+               and self.map_values == other.map_values
+
+    def __hash__(self):
+        return hash((type(self), self.variable,
+                     tuple(self.patterns),
+                     self.case_sensitive, self.match_beginning,
+                     self.map_values))
 
 
 class ValueFromDiscreteSubstring(Lookup):
@@ -105,10 +127,12 @@ class ValueFromDiscreteSubstring(Lookup):
             appear at the beginning of the string
     """
     def __init__(self, variable, patterns,
-                 case_sensitive=False, match_beginning=False):
+                 case_sensitive=False, match_beginning=False,
+                 map_values=None):
         super().__init__(variable, [])
         self.case_sensitive = case_sensitive
         self.match_beginning = match_beginning
+        self.map_values = map_values
         self.patterns = patterns  # Finally triggers computation of the lookup
 
     def __setattr__(self, key, value):
@@ -117,17 +141,33 @@ class ValueFromDiscreteSubstring(Lookup):
         super().__setattr__(key, value)
         if hasattr(self, "patterns") and \
                 key in ("case_sensitive", "match_beginning", "patterns",
-                        "variable"):
+                        "variable", "map_values"):
             self.lookup_table = map_by_substring(
                 self.variable.values, self.patterns,
-                self.case_sensitive, self.match_beginning)
+                self.case_sensitive, self.match_beginning, self.map_values)
+
+
+def unique_in_order_mapping(a):
+    """ Return
+    - unique elements of the input list (in the order of appearance)
+    - indices of the input list onto the returned uniques
+    """
+    first_position = {}
+    unique_in_order = []
+    mapping = []
+    for e in a:
+        if e not in first_position:
+            first_position[e] = len(unique_in_order)
+            unique_in_order.append(e)
+        mapping.append(first_position[e])
+    return unique_in_order, mapping
 
 
 class OWCreateClass(widget.OWWidget):
     name = "Create Class"
     description = "Create class attribute from a string attribute"
     icon = "icons/CreateClass.svg"
-    category = "Data"
+    category = "Transform"
     keywords = []
 
     class Inputs:
@@ -137,6 +177,7 @@ class OWCreateClass(widget.OWWidget):
         data = Output("Data", Table)
 
     want_main_area = False
+    buttons_area_orientation = Qt.Vertical
 
     settingsHandler = DomainContextHandler()
     attribute = ContextSetting(None)
@@ -147,6 +188,11 @@ class OWCreateClass(widget.OWWidget):
 
     TRANSFORMERS = {StringVariable: ValueFromStringSubstring,
                     DiscreteVariable: ValueFromDiscreteSubstring}
+
+    # Cached variables are used so that two instances of the widget with the
+    # same settings will create the same variable. The usual `make` wouldn't
+    # work here because variables with `compute_value` are not reused.
+    cached_variables = {}
 
     class Warning(widget.OWWidget.Warning):
         no_nonnumeric_vars = Msg("Data contains only numeric variables.")
@@ -173,24 +219,27 @@ class OWCreateClass(widget.OWWidget):
         #: list of list of QLabel: pairs of labels with counts
         self.counts = []
 
+        gui.lineEdit(
+            self.controlArea, self, "class_name",
+            orientation=Qt.Horizontal, box="New Class Name")
+
+        variable_select_box = gui.vBox(self.controlArea, "Match by Substring")
+
         combo = gui.comboBox(
-            self.controlArea, self, "attribute", label="From column: ",
-            box=True, orientation=Qt.Horizontal, callback=self.update_rules,
+            variable_select_box, self, "attribute", label="From column:",
+            orientation=Qt.Horizontal, searchable=True,
+            callback=self.update_rules,
             model=DomainModel(valid_types=(StringVariable, DiscreteVariable)))
         # Don't use setSizePolicy keyword argument here: it applies to box,
         # not the combo
-        combo.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        combo.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
 
-        patternbox = gui.vBox(self.controlArea, box=True)
+        patternbox = gui.vBox(variable_select_box)
         #: QWidget: the box that contains the remove buttons, line edits and
         #    count labels. The lines are added and removed dynamically.
         self.rules_box = rules_box = QGridLayout()
-        patternbox.layout().addLayout(self.rules_box)
-        box = gui.hBox(patternbox)
-        gui.button(
-            box, self, "+", callback=self.add_row, autoDefault=False, flat=True,
-            minimumSize=(QSize(20, 20)))
-        gui.rubber(box)
+        rules_box.setSpacing(4)
+        rules_box.setContentsMargins(4, 4, 4, 4)
         self.rules_box.setColumnMinimumWidth(1, 70)
         self.rules_box.setColumnMinimumWidth(0, 10)
         self.rules_box.setColumnStretch(0, 1)
@@ -198,15 +247,21 @@ class OWCreateClass(widget.OWWidget):
         self.rules_box.setColumnStretch(2, 100)
         rules_box.addWidget(QLabel("Name"), 0, 1)
         rules_box.addWidget(QLabel("Substring"), 0, 2)
-        rules_box.addWidget(QLabel("#Instances"), 0, 3, 1, 2)
+        rules_box.addWidget(QLabel("Count"), 0, 3, 1, 2)
         self.update_rules()
 
-        gui.lineEdit(
-            self.controlArea, self, "class_name",
-            label="Name for the new class:",
-            box=True, orientation=Qt.Horizontal)
+        widget = QWidget(patternbox)
+        widget.setLayout(rules_box)
+        patternbox.layout().addWidget(widget)
 
-        optionsbox = gui.vBox(self.controlArea, box=True)
+        box = gui.hBox(patternbox)
+        gui.rubber(box)
+        gui.button(box, self, "+", callback=self.add_row,
+                   autoDefault=False, width=34,
+                   sizePolicy=(QSizePolicy.Maximum,
+                               QSizePolicy.Maximum))
+
+        optionsbox = gui.vBox(self.controlArea, "Options")
         gui.checkBox(
             optionsbox, self, "match_beginning", "Match only at the beginning",
             callback=self.options_changed)
@@ -214,10 +269,9 @@ class OWCreateClass(widget.OWWidget):
             optionsbox, self, "case_sensitive", "Case sensitive",
             callback=self.options_changed)
 
-        box = gui.hBox(self.controlArea)
-        gui.rubber(box)
-        gui.button(box, self, "Apply", autoDefault=False, width=180,
-                   callback=self.apply)
+        gui.rubber(self.controlArea)
+
+        gui.button(self.buttonsArea, self, "Apply", callback=self.apply)
 
         # TODO: Resizing upon changing the number of rules does not work
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
@@ -245,7 +299,7 @@ class OWCreateClass(widget.OWWidget):
         self.rules = {}
         self.data = data
         model = self.controls.attribute.model()
-        model.set_domain(data and data.domain)
+        model.set_domain(data.domain if data is not None else None)
         self.Warning.no_nonnumeric_vars(shown=data is not None and not model)
         if not model:
             self.attribute = None
@@ -279,18 +333,18 @@ class OWCreateClass(widget.OWWidget):
                 self.rules_box.addWidget(edit, n_lines, coli)
                 edit.textChanged.connect(self.sync_edit)
             button = gui.button(
-                None, self, label='×', flat=True, height=20,
-                styleSheet='* {font-size: 16pt; color: silver}'
-                           '*:hover {color: black}',
-                autoDefault=False, callback=self.remove_row)
-            button.setMinimumSize(QSize(12, 20))
+                None, self, label='×', width=33,
+                autoDefault=False, callback=self.remove_row,
+                sizePolicy=(QSizePolicy.Maximum,
+                            QSizePolicy.Maximum)
+            )
             self.remove_buttons.append(button)
             self.rules_box.addWidget(button, n_lines, 0)
             self.counts.append([])
             for coli, kwargs in enumerate(
-                    (dict(alignment=Qt.AlignRight),
-                     dict(alignment=Qt.AlignLeft, styleSheet="color: gray"))):
-                label = QLabel(**kwargs)
+                    (dict(),
+                     dict(styleSheet="color: gray"))):
+                label = QLabel(alignment=Qt.AlignCenter, **kwargs)
                 self.counts[-1].append(label)
                 self.rules_box.addWidget(label, n_lines, 3 + coli)
 
@@ -383,7 +437,7 @@ class OWCreateClass(widget.OWWidget):
                 total_matching = _matcher(data, pattern)
                 yield matching, total_matching
                 remaining = remaining[~matching]
-                if len(remaining) == 0:
+                if not remaining.size:
                     break
 
         def _discrete_counts():
@@ -458,34 +512,54 @@ class OWCreateClass(widget.OWWidget):
             self.Outputs.data.send(None)
             return
         domain = self.data.domain
-        if not len(self.class_name):
+        if not self.class_name:
             self.Error.class_name_empty()
         if self.class_name in domain:
             self.Error.class_name_duplicated()
-        if not len(self.class_name) or self.class_name in domain:
+        if not self.class_name or self.class_name in domain:
             self.Outputs.data.send(None)
             return
-        rules = self.active_rules
-        # Transposition + stripping
-        valid_rules = [label or pattern or n_matches
-                       for (label, pattern), n_matches in
-                       zip(rules, self.match_counts)]
-        patterns = [pattern
-                    for (_, pattern), valid in zip(rules, valid_rules)
-                    if valid]
-        names = [name for name, valid in zip(self.class_labels(), valid_rules)
-                 if valid]
-        transformer = self.TRANSFORMERS[type(self.attribute)]
-        compute_value = transformer(
-            self.attribute, patterns, self.case_sensitive, self.match_beginning)
-        new_class = DiscreteVariable(
-            self.class_name, names, compute_value=compute_value)
+        new_class = self._create_variable()
         new_domain = Domain(
             domain.attributes, new_class, domain.metas + domain.class_vars)
         new_data = self.data.transform(new_domain)
         self.Outputs.data.send(new_data)
 
+    def _create_variable(self):
+        rules = self.active_rules
+        # Transposition + stripping
+        valid_rules = [label or pattern or n_matches
+                       for (label, pattern), n_matches in
+                       zip(rules, self.match_counts)]
+        patterns = tuple(
+            pattern for (_, pattern), valid in zip(rules, valid_rules) if valid)
+        names = tuple(
+            name for name, valid in zip(self.class_labels(), valid_rules)
+            if valid)
+        transformer = self.TRANSFORMERS[type(self.attribute)]
+
+        # join patters with the same names
+        names, map_values = unique_in_order_mapping(names)
+        names = tuple(str(a) for a in names)
+        map_values = tuple(map_values)
+
+        var_key = (self.attribute, self.class_name, names,
+                   patterns, self.case_sensitive, self.match_beginning, map_values)
+        if var_key in self.cached_variables:
+            return self.cached_variables[var_key]
+
+        compute_value = transformer(
+            self.attribute, patterns, self.case_sensitive, self.match_beginning,
+            map_values)
+        new_var = DiscreteVariable(
+            self.class_name, names, compute_value=compute_value)
+        self.cached_variables[var_key] = new_var
+        return new_var
+
     def send_report(self):
+        # Pylint gives false positives: these functions are always called from
+        # within the loop
+        # pylint: disable=undefined-loop-variable
         def _cond_part():
             rule = "<b>{}</b> ".format(class_name)
             if patt:

@@ -1,193 +1,151 @@
 import os.path
-import pathlib
-
-from AnyQt.QtWidgets import QFormLayout
-from AnyQt.QtCore import Qt
 
 from Orange.data.table import Table
-from Orange.data.io import Compression, FileFormat, TabReader, CSVReader, PickleReader, \
-    ExcelReader
+from Orange.data.io import \
+    TabReader, CSVReader, PickleReader, ExcelReader, XlsReader, FileFormat
 from Orange.widgets import gui, widget
-from Orange.widgets.settings import Setting
-from Orange.widgets.utils import filedialogs
-from Orange.widgets.utils.widgetpreview import WidgetPreview
 from Orange.widgets.widget import Input
-
-FILE_TYPES = [
-    ("{} ({})".format(w.DESCRIPTION, w.EXTENSIONS[0]),
-     w.EXTENSIONS[0],
-     w.SUPPORT_SPARSE_DATA)
-    for w in (TabReader, CSVReader, PickleReader, ExcelReader)
-]
-
-COMPRESSIONS = [
-    ("gzip ({})".format(Compression.GZIP), Compression.GZIP),
-    ("bzip2 ({})".format(Compression.BZIP2), Compression.BZIP2),
-    ("lzma ({})".format(Compression.XZ), Compression.XZ),
-]
+from Orange.widgets.settings import Setting
+from Orange.widgets.utils.save.owsavebase import OWSaveBase
+from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 
-class OWSave(widget.OWWidget):
+_userhome = os.path.expanduser(f"~{os.sep}")
+
+
+class OWSave(OWSaveBase):
     name = "Save Data"
     description = "Save data to an output file."
     icon = "icons/Save.svg"
     category = "Data"
-    keywords = []
+    keywords = ["export"]
+
+    settings_version = 2
 
     class Inputs:
         data = Input("Data", Table)
 
-    class Error(widget.OWWidget.Error):
-        unsupported_extension = widget.Msg("Selected extension is not supported.")
+    class Error(OWSaveBase.Error):
+        unsupported_sparse = widget.Msg("Use Pickle format for sparse data.")
 
-    want_main_area = False
-    resizing_enabled = False
+    add_type_annotations = Setting(True)
 
-    last_dir = Setting("")
-    auto_save = Setting(False)
-    filetype = Setting(FILE_TYPES[0][0])
-    compression = Setting(COMPRESSIONS[0][0])
-    compress = Setting(False)
+    builtin_order = [TabReader, CSVReader, PickleReader, ExcelReader, XlsReader]
 
     def __init__(self):
-        super().__init__()
-        self.data = None
-        self.filename = ""
-        self.basename = ""
-        self.type_ext = ""
-        self.compress_ext = ""
-
-        form = QFormLayout(
-            labelAlignment=Qt.AlignLeft,
-            formAlignment=Qt.AlignLeft,
-            rowWrapPolicy=QFormLayout.WrapLongRows,
-            verticalSpacing=10,
-        )
-
-        box = gui.vBox(self.controlArea, "Format")
-
-        gui.comboBox(
-            box, self, "filetype",
-            callback=self._update_text,
-            items=[item for item, _, _ in FILE_TYPES],
-            sendSelectedValue=True,
-        )
-        form.addRow("File type", self.controls.filetype, )
-
-        gui.comboBox(
-            box, self, "compression",
-            callback=self._update_text,
-            items=[item for item, _ in COMPRESSIONS],
-            sendSelectedValue=True,
-        )
-        gui.checkBox(
-            box, self, "compress", label="Use compression",
-            callback=self._update_text,
-        )
-
-        form.addRow(self.controls.compress, self.controls.compression)
-
-        box.layout().addLayout(form)
-
-        self.save = gui.auto_commit(
-            self.controlArea, self, "auto_save", "Save", box=False,
-            commit=self.save_file, callback=self.adjust_label,
-            disabled=True, addSpace=True
-        )
-        self.save_as = gui.button(
-            self.controlArea, self, "Save As...",
-            callback=self.save_file_as, disabled=True
-        )
-        self.save_as.setMinimumWidth(220)
+        super().__init__(2)
+        self.grid.addWidget(
+            gui.checkBox(
+                None, self, "add_type_annotations",
+                "Add type annotations to header",
+                tooltip=
+                "Some formats (Tab-delimited, Comma-separated) can include \n"
+                "additional information about variables types in header rows.",
+                callback=self.update_messages),
+            0, 0, 1, 2)
+        self.grid.setRowMinimumHeight(1, 8)
         self.adjustSize()
 
-    def get_writer_selected(self):
-        writer = FileFormat.get_reader(self.type_ext)
-
-        ext = self.type_ext + self.compress_ext
-        if ext not in writer.EXTENSIONS:
-            self.Error.unsupported_extension()
-            return None
-        writer.EXTENSIONS = [ext]
-        return writer
-
     @classmethod
-    def remove_extensions(cls, filename):
-        if not filename:
-            return None
-        for ext in pathlib.PurePosixPath(filename).suffixes:
-            filename = filename.replace(ext, '')
-        return filename
+    def get_filters(cls):
+        writers = [format for format in FileFormat.formats
+                   if getattr(format, 'write_file', None)
+                   and getattr(format, "EXTENSIONS", None)]
+        writers.sort(key=lambda writer: cls.builtin_order.index(writer)
+                     if writer in cls.builtin_order else 99)
 
-    def adjust_label(self):
-        if self.filename:
-            text = "Auto save as '{}'" if self.auto_save else "Save as '{}'"
-            self.save.button.setText(
-                text.format(self.basename + self.type_ext + self.compress_ext))
+        return {
+            **{f"{w.DESCRIPTION} (*{w.EXTENSIONS[0]})": w
+               for w in writers},
+            **{f"Compressed {w.DESCRIPTION} (*{w.EXTENSIONS[0]}.gz)": w
+               for w in writers if w.SUPPORT_COMPRESSED}
+        }
 
     @Inputs.data
     def dataset(self, data):
         self.data = data
-        self.save.setDisabled(data is None)
-        self.save_as.setDisabled(data is None)
-        if data is None:
+        self.on_new_input()
+
+    def do_save(self):
+        if self.writer is None:
+            super().do_save()  # This will do nothing but indicate an error
             return
-
-        items = [item for item, _, supports_sparse in FILE_TYPES
-                 if supports_sparse or not data.is_sparse()]
-        if items != [self.controls.filetype.itemText(i) for i in
-                     range(self.controls.filetype.count())]:
-            self.controls.filetype.clear()
-            self.controls.filetype.insertItems(0, items)
-            self.update_extension()
-
-        self.save_file()
-
-    def save_file_as(self):
-        file_name = self.remove_extensions(self.filename) or os.path.join(
-            self.last_dir or os.path.expanduser("~"),
-            getattr(self.data, 'name', ''))
-        self.update_extension()
-        writer = self.get_writer_selected()
-        if not writer:
+        if self.data.is_sparse() and not self.writer.SUPPORT_SPARSE_DATA:
             return
+        self.writer.write(self.filename, self.data, self.add_type_annotations)
 
-        filename, writer, _ = filedialogs.open_filename_dialog_save(
-            file_name, '', [writer],
-        )
-        if not filename:
-            return
+    def update_messages(self):
+        super().update_messages()
+        self.Error.unsupported_sparse(
+            shown=self.data is not None and self.data.is_sparse()
+            and self.filename
+            and self.writer is not None and not self.writer.SUPPORT_SPARSE_DATA)
 
-        self.filename = filename
-        self.last_dir = os.path.split(self.filename)[0]
-        self.basename = os.path.basename(self.remove_extensions(filename))
-        self.unconditional_save_file()
-        self.adjust_label()
+    def send_report(self):
+        self.report_data_brief(self.data)
+        writer = self.writer
+        noyes = ["No", "Yes"]
+        self.report_items((
+            ("File name", self.filename or "not set"),
+            ("Format", writer and writer.DESCRIPTION),
+            ("Type annotations",
+             writer and writer.OPTIONAL_TYPE_ANNOTATIONS
+             and noyes[self.add_type_annotations])
+        ))
 
-    def save_file(self):
-        if self.data is None:
-            return
-        if not self.filename:
-            self.save_file_as()
+    @classmethod
+    def migrate_settings(cls, settings, version=0):
+        def migrate_to_version_2():
+            # Set the default; change later if possible
+            settings.pop("compression", None)
+            settings["filter"] = next(iter(cls.get_filters()))
+            filetype = settings.pop("filetype", None)
+            if filetype is None:
+                return
+
+            ext = cls._extension_from_filter(filetype)
+            if settings.pop("compress", False):
+                for afilter in cls.get_filters():
+                    if ext + ".gz" in afilter:
+                        settings["filter"] = afilter
+                        return
+                # If not found, uncompressed may have been erroneously set
+                # for a writer that didn't support if (such as .xlsx), so
+                # fall through to uncompressed
+            for afilter in cls.get_filters():
+                if ext in afilter:
+                    settings["filter"] = afilter
+                    return
+
+        if version < 2:
+            migrate_to_version_2()
+
+    def initial_start_dir(self):
+        if self.filename and os.path.exists(os.path.split(self.filename)[0]):
+            return self.filename
         else:
-            try:
-                self.get_writer_selected().write(
-                    os.path.join(
-                        self.last_dir,
-                        self.basename + self.type_ext + self.compress_ext),
-                    self.data)
-            except Exception as err_value:
-                self.error(str(err_value))
-            else:
-                self.error()
+            data_name = getattr(self.data, 'name', '')
+            if data_name:
+                if self.writer is None:
+                    self.filter = self.default_filter()
+                assert self.writer is not None
+                data_name += self.writer.EXTENSIONS[0]
+            return os.path.join(self.last_dir or _userhome, data_name)
 
-    def update_extension(self):
-        self.type_ext = [ext for name, ext, _ in FILE_TYPES if name == self.filetype][0]
-        self.compress_ext = dict(COMPRESSIONS)[self.compression] if self.compress else ''
+    def valid_filters(self):
+        if self.data is None or not self.data.is_sparse():
+            return self.get_filters()
+        else:
+            return {filt: writer for filt, writer in self.get_filters().items()
+                    if writer.SUPPORT_SPARSE_DATA}
 
-    def _update_text(self):
-        self.update_extension()
-        self.adjust_label()
+    def default_valid_filter(self):
+        valid = self.valid_filters()
+        if self.data is None or not self.data.is_sparse() \
+                or (self.filter in valid
+                        and valid[self.filter].SUPPORT_SPARSE_DATA):
+            return self.filter
+        return next(iter(valid))
 
 
 if __name__ == "__main__":  # pragma: no cover

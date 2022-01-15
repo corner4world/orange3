@@ -1,5 +1,5 @@
 # This module is a mixture of imports and code, so we allow import anywhere
-# pylint: disable=wrong-import-position
+# pylint: disable=wrong-import-position,wrong-import-order
 
 from Orange import data
 

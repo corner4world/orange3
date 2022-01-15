@@ -75,8 +75,8 @@ class SqlTable(Table):
                 try:
                     self.backend = backend(connection_params)
                     break
-                except BackendError as ex:
-                    print(ex)
+                except BackendError:
+                    pass
             else:
                 raise ValueError("No backend could connect to server")
         else:
@@ -178,7 +178,7 @@ class SqlTable(Table):
         if not values:
             raise IndexError('Could not retrieve row {} from table {}'.format(
                 row_index, self.name))
-        return SqlRowInstance(self.domain, values[0])
+        return Instance(self.domain, values[0])
 
     def __iter__(self):
         """ Iterating through the rows executes the query using a cursor and
@@ -187,7 +187,7 @@ class SqlTable(Table):
         attributes = self.domain.variables + self.domain.metas
 
         for row in self._query(attributes):
-            yield SqlRowInstance(self.domain, row)
+            yield Instance(self.domain, row)
 
     def _query(self, attributes=None, filters=(), rows=None):
         if attributes is not None:
@@ -445,11 +445,12 @@ class SqlTable(Table):
                 data = list(cur.fetchall())
                 if column.is_continuous:
                     all_contingencies[i] = \
-                        (self._continuous_contingencies(data, row), [])
+                        (self._continuous_contingencies(data, row), [], [], 0)
                 else:
                     all_contingencies[i] =\
-                        (self._discrete_contingencies(data, row, column), [])
-        return all_contingencies, None
+                        (self._discrete_contingencies(data, row, column), [],
+                         [], 0)
+        return all_contingencies
 
     def _continuous_contingencies(self, data, row):
         values = np.zeros(len(data))
@@ -556,6 +557,7 @@ class SqlTable(Table):
 
     @classmethod
     def from_table(cls, domain, source, row_indices=...):
+        # pylint: disable=unused-argument
         assert row_indices is ...
 
         table = source.copy()
@@ -652,16 +654,3 @@ class SqlTable(Table):
 
     def checksum(self, include_metas=True):
         return np.nan
-
-
-class SqlRowInstance(Instance):
-    """
-    Extends :obj:`Orange.data.Instance` to correctly handle values of meta
-    attributes.
-    """
-
-    def __init__(self, domain, data=None):
-        nvar = len(domain.variables)
-        super().__init__(domain, data[:nvar])
-        if len(data) > nvar:
-            self._metas = np.asarray(data[nvar:], dtype=object)

@@ -3,7 +3,651 @@ Change Log
 
 [next] - TBA
 ------------
-* ...
+
+
+[3.31.1] - 2022-01-07
+--------------------
+##### Bugfixes
+* Group by: compute mode when all values in group nan ([#5763](../../pull/5763))
+* Support numpy 1.22 ([#5760](../../pull/5760))
+* Unpickling pre-3.28.0 Transformation ([#5759](../../pull/5759))
+
+
+[3.31.0] - 2021-12-17
+--------------------
+##### Enhancements
+* oweditdomain: Indicate variables in error state ([#5732](../../pull/5732))
+* Scatterplot: Use opacity for contrast ([#5684](../../pull/5684))
+* Feature Constructor: Evaluate categorical variables to strings ([#5637](../../pull/5637))
+* New widget: Group By  ([#5541](../../pull/5541))
+* Table lock: tests run with tables that are read-only by default ([#5381](../../pull/5381))
+* config: sort example workflows ([#5600](../../pull/5600))
+
+##### Bugfixes
+* Paint Data: Fix ClearTool's issued commands ([#5718](../../pull/5718))
+* pandas_compat: fix table_from_frames for "normal" dataframe ([#5652](../../pull/5652))
+* pandas_compat: do not parse column of numbers (object dtype) to datetime ([#5681](../../pull/5681))
+* HeatMap: Color gradient center value edit ([#5647](../../pull/5647))
+* Distance Matrix: Fix crash on numeric meta vars as labels ([#5664](../../pull/5664))
+* Fix running OWS with widgets with WebView in Orange.canvas.run ([#5657](../../pull/5657))
+* main: Fix `--clear-widget-settings` parameter declaration ([#5619](../../pull/5619))
+
+
+[3.30.2] - 2021-10-27
+--------------------
+##### Bugfixes
+* Projections: Fix color density for continuous color palettes ([#5665](../../pull/5665))
+* Fixes for scikit-learn 1.0 ([#5608](../../pull/5608))
+* table_from_grames: fix indices parsing ([#5620](../../pull/5620))
+* Fix overflow in bin calculations for time variables.  ([#5667](../../pull/5667))
+* Variable: fix timezone when parsing time variable ([#5617](../../pull/5617))
+* Require widget-base 4.15.1 and canvas-core 0.1.23 to fix some bugs/crashes
+
+
+[3.30.1] - 2021-09-24
+--------------------
+##### Bugfixes
+* OWTable: fix select whole rows regression ([#5605](../../pull/5605))
+
+
+[3.30.0] - 2021-09-22
+--------------------
+##### Enhancements
+* OWPythonScript: Better text editor ([#5208](../../pull/5208))
+* PCA: Output variance of components ([#5513](../../pull/5513))
+* Curve Fit: New widget ([#5481](../../pull/5481))
+* Hierarchical Clustering: Annotate variables with clusters ([#5514](../../pull/5514))
+* Create nodes on canvas drag/drop ([#5031](../../pull/5031))
+
+##### Bugfixes
+* setup.py: do not overwrite conda's PyQt5 ([#5593](../../pull/5593))
+* Use explicit ordered multiple inputs ([#4860](../../pull/4860))
+* Prevent crash when saving in unsupported format ([#5560](../../pull/5560))
+* owrocanalysis: Fix test for non empty points array ([#5571](../../pull/5571))
+* pandas_compat: fix conversion of datetime series ([#5547](../../pull/5547))
+* Fix deepcopy and pickle for classes derived from `np.ndarray` ([#5536](../../pull/5536))
+* owheatmap: Fix assertion error when restoring selection ([#5517](../../pull/5517))
+* Pivot: Handle empty data, metas only ([#5527](../../pull/5527))
+* table_to_frame - handle numeric columns with dtype=object ([#5474](../../pull/5474))
+* listfilter: Bypass QListView.dropEvent ([#5477](../../pull/5477))
+
+
+[3.29.3] - 2021-06-09
+--------------------
+##### Bugfixes
+* Create Class: fix incorrect value assignment
+
+
+[3.29.2] - 2021-06-08
+--------------------
+##### Bugfixes
+* Bump orange-canvas-core minimum version requirement ([#5472](../../pull/5472))
+* owpca: fix component selection when dragging selection line ([#5469](../../pull/5469))
+* Save File when workflow basedir is an empty string ([#5459](../../pull/5459))
+
+
+[3.29.1] - 2021-05-31
+--------------------
+
+
+[3.29.0] - 2021-05-28
+--------------------
+##### Enhancements
+* Scatter plot: Bring discrete attributes functionality back ([#5440](../../pull/5440))
+* Caching data delegate ([#5296](../../pull/5296))
+* textimport: Mark encoding errors in the preview ([#5438](../../pull/5438))
+* DBSCAN: Optional normalization ([#5428](../../pull/5428))
+* Automated and better summaries ([#5308](../../pull/5308))
+* Transpose: Offload work onto separate thread, remove redundant instance ([#5314](../../pull/5314))
+* Domain transformations in batches for less memory use ([#5218](../../pull/5218))
+* Feature Statistics: Add median ([#5325](../../pull/5325))
+* New widget: Aggregate Columns ([#5256](../../pull/5256))
+
+##### Bugfixes
+* Outlier detection: keep instance ids, make thread safe ([#5427](../../pull/5427))
+* UrlReader: Support urls with special characters ([#5412](../../pull/5412))
+* Speed-up slow table_to_frame ([#5413](../../pull/5413))
+* Line Plot: Single instance input fix ([#5408](../../pull/5408))
+* Pivot: Assign dataset name to output tables ([#5404](../../pull/5404))
+* setup.py: Exclude benchmark directory from the install ([#5392](../../pull/5392))
+* Errors when converting negative timestamps on Windows ([#5388](../../pull/5388))
+* Nomogram: Retain original compute_value ([#5382](../../pull/5382))
+* Radviz VizRank: Implement on_selection_changed ([#5338](../../pull/5338))
+
+
+[3.28.0] - 2021-03-05
+--------------------
+##### Enhancements
+* Bar Plot: Improve "Group by" visualization ([#5301](../../pull/5301))
+* Violin Plot: New widget ([#5252](../../pull/5252))
+* Test and Score: Copy selected rows to clipboard ([#5203](../../pull/5203))
+* Projections: Allow transparent subset ([#5141](../../pull/5141))
+* Gradient Boosting: New widget ([#5160](../../pull/5160))
+* Impute: Allow setting a default value for all numeric and time variables ([#5102](../../pull/5102))
+* Distribution: Show equal bar widths on unique-valued bins ([#5139](../../pull/5139))
+* Implement proper Lift curve; keep Cumulative gains as an option ([#5075](../../pull/5075))
+* Create Instance: New widget ([#5033](../../pull/5033))
+* Add add_column and concatenate methods to Table ([#5251](../../pull/5251))
+
+##### Bugfixes
+* Calibration model: Work with numpy data ([#5159](../../pull/5159))
+* Rank: Switch to manual selection on deselect ([#5271](../../pull/5271))
+* Create Class: multiple patterns for a class value ([#5283](../../pull/5283))
+* Test and Score: Fix stratification warnings ([#5281](../../pull/5281))
+* Predictions: Fix crash when clicking on empty left area ([#5222](../../pull/5222))
+* Distribution: vectorize variance, speeds up normalization ([#5230](../../pull/5230))
+* owimpute: Make `default_numeric` locale independant ([#5209](../../pull/5209))
+* Pivot: Display time variable in time format ([#5212](../../pull/5212))
+* OWScatterPlotBase: Ignore 'Other' when showing color regions ([#5214](../../pull/5214))
+* Fix performance regression in scatterplot ([#5206](../../pull/5206))
+* Pivot: Fix table for categorical variables ([#5193](../../pull/5193))
+* Distance Matrix: Fix freeze with large selections ([#5176](../../pull/5176))
+* Xls reader: Error as missing value ([#5192](../../pull/5192))
+* owdataset: Do not capture self in closure ([#5198](../../pull/5198))
+* ROC shows all points, including the last ([#5138](../../pull/5138))
+* Pivot: Output date for group by table ([#5202](../../pull/5202))
+* Enable classification tests ([#5168](../../pull/5168))
+* Data Table: Fix freeze with large selections ([#5164](../../pull/5164))
+* OWImpute: Preserve default method setting ([#5181](../../pull/5181))
+* AdaBoost: Set maximum number of estimators to 10000 ([#5165](../../pull/5165))
+* Feature Statistics: Error in time variable display ([#5152](../../pull/5152))
+* owpythonscript: Use signal id as is ([#5147](../../pull/5147))
+* SqlTable use empty string instead of None for StringVariable ([#5120](../../pull/5120))
+* Pivot: Handle big dataset ([#5104](../../pull/5104))
+* SQL: Fix the issue with database collation setting when retrieving column values ([#5089](../../pull/5089))
+* impute: Remove class vars from input data for ReplaceUnknownsModel ([#5083](../../pull/5083))
+* Edit Domain: Preserve renames on categories merge ([#5072](../../pull/5072))
+* CSV File Import: sort discrete values naturally ([#5041](../../pull/5041))
+
+
+[3.27.1] - 2020-10-23
+--------------------
+##### Bugfixes
+* customizableplot.available_font_families: Fix for non-existent default family ([#5037](../../pull/5037))
+* Raise canvas-core version to fix some problems with Qt 5.9 ([#5045](../../pull/5045))
+
+
+[3.27.0] - 2020-10-09
+--------------------
+##### Enhancements
+* Table: Re-add info box about data properties ([#5011](../../pull/5011))
+* Rank widget computation in a separate thread ([#4908](../../pull/4908))
+* Neighbors: improve exclusion of references, checkbox to (un)limit output data ([#4997](../../pull/4997))
+* Bar Plot: New widget ([#4923](../../pull/4923))
+* Replace listViews with searchable listViews ([#4924](../../pull/4924))
+* Add an option to set intercept in linear regression to 0 ([#4958](../../pull/4958))
+* CSV File Import: Add support for explicit workflow relative paths ([#4872](../../pull/4872))
+* OWColor: Saving and loading color schemata ([#4977](../../pull/4977))
+* Distributions: Add sorting by category size ([#4959](../../pull/4959))
+* Proxy support for embeddings ([#4953](../../pull/4953))
+* Discretize: Manual cut points entry ([#4929](../../pull/4929))
+* Predictions: Allow selecting a subset of rows ([#4871](../../pull/4871))
+* Projection plots: Customize labels ([#4828](../../pull/4828))
+* get_unique_names: Handle more independent names ([#4866](../../pull/4866))
+* Edit Domain: Add option to unlink variable from source variable ([#4863](../../pull/4863))
+* Louvain Clustering: Add cosine similarity ([#4864](../../pull/4864))
+
+##### Bugfixes
+* Fix line plot's send_report ([#5018](../../pull/5018))
+* Scatter Plot: fix unzoom with density plot ([#5004](../../pull/5004))
+* ownomogram: Fix wrapped C++ obj error ([#5005](../../pull/5005))
+* Fix slicing in from_table ([#4963](../../pull/4963))
+* Edit Domain: Multiple item rename/merge ([#4949](../../pull/4949))
+* ProjectionWidgetMixinTests: set shape attribute only when discrete var available ([#4946](../../pull/4946))
+* Fix variables equality and hashes  ([#4957](../../pull/4957))
+* Fix wrong assert in heatmap ([#4955](../../pull/4955))
+* Edit Domain (and perhaps other widgets) could cause missing data later in the workflow ([#4922](../../pull/4922))
+* OWScatterPlotBase: Reset view before labels update ([#4907](../../pull/4907))
+* owcsvimport: Fix a type error in _open for zip archive ([#4921](../../pull/4921))
+* Line Plot: Reset axis ticks on data change ([#4873](../../pull/4873))
+* MDS: Move lines when points are jittered ([#4920](../../pull/4920))
+* owcsvimport: Handle decimal and thousand separator ([#4915](../../pull/4915))
+* Select Rows: fix fail when time variable in metas ([#4912](../../pull/4912))
+* Re-add TupleList to DiscreteVariable ([#4879](../../pull/4879))
+* concurrent: Use a workaround for QObject wrapper deletion ([#4635](../../pull/4635))
+* normalize: Adjust number_of_decimals after scaling ([#4779](../../pull/4779))
+
+
+[3.26.0] - 2020-06-12
+--------------------
+##### Enhancements
+* main: Log to main window output view ([#4842](../../pull/4842))
+* Feature statistics report ([#4812](../../pull/4812))
+* Distributions: change Histogram Data output ([#4832](../../pull/4832))
+* owtable: output sorted data ([#4644](../../pull/4644))
+* Add an option to Concatenate to merge columns with different formulae ([#4831](../../pull/4831))
+* CSV Import: guess data types ([#4838](../../pull/4838))
+* HeatMap: Allow setting the center when using diverging palettes ([#4809](../../pull/4809))
+* Heatmap: Split columns, Column annotations ([#4703](../../pull/4703))
+* Sort values naturally when reading files ([#4793](../../pull/4793))
+* Color widget: Add reset button ([#4718](../../pull/4718))
+* Gradient selection/parameters widget ([#4596](../../pull/4596))
+* Select Rows: Allow partial context matches ([#4740](../../pull/4740))
+* Edit Domain: Add an option to change the output table name ([#4722](../../pull/4722))
+* ApplyDomain: data info displayed in the status bar ([#4611](../../pull/4611))
+* BoxPlot: data info displayed in the status bar ([#4626](../../pull/4626))
+* LinePlot: data info displayed in the status bar ([#4633](../../pull/4633))
+* MosaicDisplay: data info displayed in the status bar ([#4634](../../pull/4634))
+* CreateClass: data info displayed in the status bar ([#4625](../../pull/4625))
+
+##### Bugfixes
+* Variable: Fix cases when equal variables had different hashes ([#4843](../../pull/4843))
+* OWBoxPlot: Fix wrong labels position and ordering for values with no items ([#4829](../../pull/4829))
+* Select Rows: Fix saving meta variables in context ([#4830](../../pull/4830))
+* Select Columns: Fix attributes sorting ([#4827](../../pull/4827))
+* Fix and update Softmax regression learner ([#4767](../../pull/4767))
+* PCA: fix subsets with the "Data" output ([#4811](../../pull/4811))
+* OWContinuize: Fix treatment of continuous features. ([#4806](../../pull/4806))
+* Select Rows: Fix incorrectly stored values in settings ([#4798](../../pull/4798))
+* Fix colors for discrete variables with >256 values ([#4803](../../pull/4803))
+* Unique domain checks ([#4760](../../pull/4760))
+* owheatmap: Use 'is' instead of 'eq' for column id comparison ([#4788](../../pull/4788))
+* BoxPlot: Fix invalid data range ([#4769](../../pull/4769))
+* graphicstextlist: Fix size/spacing adjustment for single item ([#4777](../../pull/4777))
+* Feature Statistics: Fix wrong or even crashing selections ([#4741](../../pull/4741))
+* UrlReader: shorten TempFile extension ([#4747](../../pull/4747))
+* Embedder: catch machine id setting type error ([#4675](../../pull/4675))
+* relief: Fix contingency (de)allocation ([#4745](../../pull/4745))
+* Test and Score: Improve data errors ([#4738](../../pull/4738))
+* PythagoreanTree: Fix crushing when number of classes decreases ([#4743](../../pull/4743))
+* Fix report in Predictions ([#4709](../../pull/4709))
+* owheatmap: Handle all N/A column for color annotation ([#4742](../../pull/4742))
+* Distributions widget's legend: Remove the square from sigma in normal and Rayleigh ([#4739](../../pull/4739))
+* Several fixes in learners/models ([#4655](../../pull/4655))
+* Heatmap: Split by missing values ([#4686](../../pull/4686))
+* Owpaintdata, owpivot: ensure unique domain ([#4578](../../pull/4578))
+* Pythagorantrees/forests: change context handler ([#4656](../../pull/4656))
+* Color: Fix renaming of variables ([#4669](../../pull/4669))
+* Heatmap: Sticky footer ([#4610](../../pull/4610))
+* SOM: fix colors for numeric variables ([#4660](../../pull/4660))
+* Fixes for deprecations in 3.26, and for changed behaviour of file dialog ([#4643](../../pull/4643))
+
+
+[3.25.1] - 2020-05-22
+--------------------
+##### Bugfixes
+* Fix compatibility with scikit-learn 0.23 ([#4768](../../pull/4768))
+
+
+[3.25.0] - 2020-04-10
+--------------------
+##### Enhancements
+* Searchable combo boxes in all evaluate widgets ([#4564](../../pull/4564))
+* Searchable combo boxes in all visualize widgets ([#4563](../../pull/4563))
+* Searchable combo boxes in all unsupervised widgets ([#4565](../../pull/4565))
+* Projections keep colors after merging values ([#4577](../../pull/4577))
+* Distance Map: Add a color map legend ([#4593](../../pull/4593))
+* Orange.misc.environ config ([#4576](../../pull/4576))
+* Searchable combo boxes in all data widgets ([#4562](../../pull/4562))
+* Fix printing values with too few decimals ([#4575](../../pull/4575))
+* Scatter Plot: Replace combo box with search combo box ([#4447](../../pull/4447))
+* Save widgets: Store paths relative to workflow directory ([#4532](../../pull/4532))
+* Edit Domain: Option to merge less frequent values ([#4477](../../pull/4477))
+* Load Model: Use paths relative to workflow file ([#4534](../../pull/4534))
+* Ignore missing values in density plots of projections ([#4525](../../pull/4525))
+* Impose a sensible z-order to points in projections  ([#4504](../../pull/4504))
+* Use Github actions as a new CI system. ([#4482](../../pull/4482))
+* Testing with Tox ([#4481](../../pull/4481))
+* Add row side color annotations ([#4443](../../pull/4443))
+* Outliers: Offload work onto separate thread ([#4412](../../pull/4412))
+* OWScatterPlot: axis displays time specific labels for time variable ([#4434](../../pull/4434))
+* Predictions: Update splitter on resize ([#4433](../../pull/4433))
+* Import openTSNE lazily for faster loading of Orange ([#4424](../../pull/4424))
+* Silhouette Plot: Always output scores ([#4423](../../pull/4423))
+* Heatmap: Tighter layout ([#4390](../../pull/4390))
+* Reorganize continuous palettes ([#4305](../../pull/4305))
+* Outliers: Save model into compute_value ([#4372](../../pull/4372))
+* Allow concurrent transformation of tables into new domains ([#4363](../../pull/4363))
+* Test & Score: Add comparison of models ([#4261](../../pull/4261))
+* Outliers: Widget upgrade ([#4338](../../pull/4338))
+* Concatenate: data info displayed in the status bar ([#4617](../../pull/4617))
+* Distributions: data info displayed in the status bar ([#4627](../../pull/4627))
+* MergeData: data info displayed in the status bar ([#4592](../../pull/4592))
+* Neighbors: data info displayed in the status bar ([#4612](../../pull/4612))
+* SelectByDataIndex: data info displayed in the status bar ([#4595](../../pull/4595))
+* OWOutliers: Data info displayed in the status bar ([#4547](../../pull/4547))
+* OWDataProjectionWidget: Upgrade status bar data info ([#4544](../../pull/4544))
+* Heatmap: Restore ability to cluster larger datasets ([#4290](../../pull/4290))
+* OWImpute: Data info displayed in the status bar ([#4499](../../pull/4499))
+* OWFile: Data info displayed in the status bar ([#4506](../../pull/4506))
+* OWCSVImport: Data info displayed in the status bar ([#4509](../../pull/4509))
+* OWDatasets: Data info displayed in the status bar ([#4512](../../pull/4512))
+* OWDataInfo: Data info displayed in the status bar ([#4513](../../pull/4513))
+* OWSave: Data info displayed in the status bar ([#4505](../../pull/4505))
+* OWPurgeDomain: Data info displayed in the status bar ([#4502](../../pull/4502))
+* OWColor: Data info displayed in the status bar ([#4501](../../pull/4501))
+* OWRandomize: Data info displayed in the status bar ([#4498](../../pull/4498))
+* OWPivotTable: Data info displayed in the status bar ([#4472](../../pull/4472))
+* OWContinuize: Data info displayed in the status bar ([#4494](../../pull/4494))
+* OWFeatureConstructor: Data info displayed in the status bar ([#4496](../../pull/4496))
+* OWSelectRows: Data info displayed in the status bar ([#4471](../../pull/4471))
+* OWDiscretize: Data info displayed in the status bar ([#4495](../../pull/4495))
+* OWDataSampler: Data info displayed in the status bar ([#4492](../../pull/4492))
+* OWRank: Data info displayed in the status bar ([#4473](../../pull/4473))
+* OWContinuize: Provide the same options as in Preprocess/Normalize ([#4466](../../pull/4466))
+* OWCorrelations: Data info displayed in the status bar ([#4455](../../pull/4455))
+* OWEditDomain: Data info displayed in the status bar ([#4456](../../pull/4456))
+* OWSelectColumns: Data info displayed in the status bar ([#4454](../../pull/4454))
+* OWTranspose: Data info displayed in the status bar ([#4413](../../pull/4413))
+* OWFeatureStatistics: data info displayed in the status bar ([#4409](../../pull/4409))
+* OWPreporcess: Data info displayed in the status bar ([#4414](../../pull/4414))
+
+##### Bugfixes
+* Edit Domain: Fix merge values when missing data ([#4636](../../pull/4636))
+* Table: Send correct output when switching between tabs ([#4619](../../pull/4619))
+* Give created QGraphicsScenes a parent ([#4352](../../pull/4352))
+* Fix dimensionality of probabilities from values ([#4629](../../pull/4629))
+* PyTableModel: Allow wrapping empty lists ([#4631](../../pull/4631))
+* Edit Domain: Improve Text/Categorical to Time conversion ([#4601](../../pull/4601))
+* colorpalettes: fix BinnedContinuousPalette color assignments ([#4609](../../pull/4609))
+* Classification models output correct shapes ([#4602](../../pull/4602))
+* owtestandscore: Add cancelled tasks to dispose queue ([#4615](../../pull/4615))
+* Nomogram: Fix crash on Python 3.8 ([#4591](../../pull/4591))
+* K-means slowness ([#4541](../../pull/4541))
+* Use new access token in cleanup workflow ([#4590](../../pull/4590))
+* Detect duplicate names of variables in projections. ([#4550](../../pull/4550))
+* Paint Data: Send correct output after clicking Reset to Input ([#4551](../../pull/4551))
+* TimeVariable.parse: Do not modify _ISO_FORMATS ([#4539](../../pull/4539))
+* heatmap: Ensure minimim size for color annotations ([#4519](../../pull/4519))
+* OWEditDomain: Clear editor when data is disconnected ([#4484](../../pull/4484))
+* ContinuousPalettesModel: Disable 'category' items via `flags` ([#4538](../../pull/4538))
+* utils/image: Return early when image is empty ([#4520](../../pull/4520))
+* graphicstextlist: Use integer font metrics again ([#4524](../../pull/4524))
+* Concatenate: Fix wrong merging of categorical features ([#4425](../../pull/4425))
+* Ensure unique var names in file ([#4431](../../pull/4431))
+* Rank: Fix error with Random forest ([#4457](../../pull/4457))
+* owhierclustering: Update the scene's sceneRect ([#4459](../../pull/4459))
+* Venn Diagram is slow for big datasets ([#4400](../../pull/4400))
+* Fix missing values after purging unused values ([#4432](../../pull/4432))
+* File: Construct unique column names. ([#4420](../../pull/4420))
+* format_summary_details: Replace 'features' with 'variables' ([#4419](../../pull/4419))
+* Feature Constructor: Catch exceptions ([#4401](../../pull/4401))
+* Continuize: Disable normalizing sparse data ([#4379](../../pull/4379))
+* Python script serialization state ([#4345](../../pull/4345))
+* DataProjectionWidget: Update combos on new data ([#4405](../../pull/4405))
+* DataProjectionWidget: attribute Selected ([#4393](../../pull/4393))
+* Fix slow clear/delete in 'Heat Map' 'Hier. Clustering', 'Distance Map' ([#4365](../../pull/4365))
+* Explicitly define the protocol version for pickling ([#4388](../../pull/4388))
+* Table.from_table: fix caching with reused ids  ([#4370](../../pull/4370))
+* FeatureStatistics: Convert selected rows to list ([#4375](../../pull/4375))
+* Error message on tSNE with one variable ([#4364](../../pull/4364))
+* Normalize: Integer variable representation ([#4350](../../pull/4350))
+* DendrogramWidget: Remove event filters before removing items ([#4361](../../pull/4361))
+* Round bhattacharayya ([#4340](../../pull/4340))
+
+
+[3.24.1] - 2020-01-17
+--------------------
+##### Enhancements
+* OWPreprocess: data info displayed in status bar ([#4333](../../pull/4333))
+* OWDiscretize: data info displayed in status bar ([#4331](../../pull/4331))
+* OWContinuize: data info displayed in status bar ([#4327](../../pull/4327))
+* OWTranspose: data info displayed in status bar ([#4295](../../pull/4295))
+* Silhouette plot: Accept distance matrix on input ([#4313](../../pull/4313))
+* Preprocess: Add filtering by missing values ([#4266](../../pull/4266))
+* Allow add-ons to register file format for the Save widget ([#4302](../../pull/4302))
+* Box Plot: Add box for missing group values ([#4292](../../pull/4292))
+* clustering/hierarchical: Use optimal\_leaf\_ordering from scipy ([#4288](../../pull/4288))
+* Distributions: Add option to hide bars ([#4301](../../pull/4301))
+
+##### Bugfixes
+* ExcelReader: Speedup ([#4339](../../pull/4339))
+* Nomogram: Adjust scale considering label width ([#4329](../../pull/4329))
+* owhierarchicalclustering: Prescale dendrogram geometry ([#4322](../../pull/4322))
+* table\_to\_frame: metas lost on conversion ([#4259](../../pull/4259))
+* TestOWRank: Setting type should not be np.ndarray ([#4315](../../pull/4315))
+* Distances: Fix restoring the cosine distance ([#4311](../../pull/4311))
+* Fix saving workflows that contain a Rank widget ([#4289](../../pull/4289))
+* utils/textimport: Remove 'exclusive' kwarg from QActionGroup call ([#4298](../../pull/4298))
+
+
+[3.24.0] - 2019-12-20
+--------------------
+##### Enhancements
+* Remove Variable.make ([#3925](../../pull/3925))
+* OWTreeViewer: Bold predicted values in tree nodes ([#4269](../../pull/4269))
+* Edit Domain: Reinterpret column type transforms ([#4262](../../pull/4262))
+* OWTree: Add 'Classification Tree' keyword ([#4283](../../pull/4283))
+* ConcurrentWidgetMixin: Cancel task on input change ([#4219](../../pull/4219))
+* PCA: Add a signal with original data + pca ([#4255](../../pull/4255))
+* Distances: Offload work to a separate thread ([#4046](../../pull/4046))
+* Venn Diagram: Add relations over columns, simplify over rows ([#4006](../../pull/4006))
+* Merge Data: Implement context settings ([#4248](../../pull/4248))
+* Heatmap: Option to center color palette at 0 ([#4218](../../pull/4218))
+* owheatmap: Add Split By combo box ([#4234](../../pull/4234))
+* Heatmap: Allow labeling by any variable ([#4209](../../pull/4209))
+* Test & Score Widget: Cancellability on input change. ([#4079](../../pull/4079))
+* Boxplot no longer stretches bars when this is uninformative ([#4176](../../pull/4176))
+* Box plot: Add 'order by importance' checkbox to groups ([#4055](../../pull/4055))
+* Add pyproject.toml ([#4179](../../pull/4179))
+* Add remove sparse features preprocessor ([#4093](../../pull/4093))
+* Output to OWCorrespondence ([#4180](../../pull/4180))
+* macOS: Installer python version ([#4130](../../pull/4130))
+* OWBoxPlot: Show missing values ([#4135](../../pull/4135))
+* Neighbors: Data info displayed in status bar ([#4157](../../pull/4157))
+* Preprocess: Tests update
+* Bhatthacharayya distance ([#4111](../../pull/4111))
+* MergeData: Don't remove duplicate columns with different data ([#4100](../../pull/4100))
+* Nice binning of time variables (Distributions, SOM) ([#4123](../../pull/4123))
+* OWBaseSql: Base widget for connecting to a database ([#4083](../../pull/4083))
+* k-Means: Add normalization checkbox ([#4099](../../pull/4099))
+* Datasets: Remove control area ([#4071](../../pull/4071))
+* Correlations: Include continuous class and meta variables ([#4067](../../pull/4067))
+
+##### Bugfixes
+* SQL: Save selected backend to settings ([#4270](../../pull/4270))
+* ExcelReader: Migrate to openpyxl ([#4279](../../pull/4279))
+* owcsvimport: Fix last/recent item serialization ([#4272](../../pull/4272))
+* owselectcolumns: Fix move up/down type error ([#4271](../../pull/4271))
+* Table: Keep pending selection if data is None ([#4281](../../pull/4281))
+* Select Rows: Fix crash on changed variable type ([#4254](../../pull/4254))
+* Louvain Clustering: Update graph output for compatibility with the new network add-on ([#4258](../../pull/4258))
+* Merge data: Migrate settings ([#4263](../../pull/4263))
+* Feature Statistics: Do not crash on empty domain ([#4245](../../pull/4245))
+* File widget: fix name change ([#4235](../../pull/4235))
+* Various fixes of box plot ([#4231](../../pull/4231))
+* Fix guessing strategy for date and time variables ([#4226](../../pull/4226))
+* owtable: Preserve tab order of updated inputs ([#4225](../../pull/4225))
+* Feature Constructor: Compatibility with Python 3.8 ([#4222](../../pull/4222))
+* File: Fix domain edit on no changes ([#4232](../../pull/4232))
+* Normalizer: Retain attributes of attributes ([#4217](../../pull/4217))
+* Hierarchical Clustering: Fix Annotations selection ([#4214](../../pull/4214))
+* MDS: Place lines under points and labels ([#4213](../../pull/4213))
+* Fix crash in Preprocess' Select Relevant Features when there are no features ([#4207](../../pull/4207))
+* Louvain Clustering: fix setting to restore correctly ([#4187](../../pull/4187))
+* SOM: Fix crash when clicking on empty canvas ([#4177](../../pull/4177))
+* build-conda-installer.sh: Do not use python version from Miniconda ([#4142](../../pull/4142))
+* Fix core dump in CI in SOM on sparse data ([#4174](../../pull/4174))
+* ROC and LiftCurve: Store context settings ([#4138](../../pull/4138))
+* Preprocess: Tests update
+* Normalize: Fix crash with nan column ([#4125](../../pull/4125))
+* Warning for discrete variable with >100 values in OWFile ([#4120](../../pull/4120))
+* owcsvimport: Make the progress update a direct connection ([#4109](../../pull/4109))
+* Scatterplot: Disable vizrank when features on input ([#4102](../../pull/4102))
+* Sieve: Disable vizrank when features on input ([#4101](../../pull/4101))
+* Datetime conversion to string ([#4098](../../pull/4098))
+* Self-Organizing Map: Fix restoring width ([#4097](../../pull/4097))
+* K-means: Save Silhouette Scores selection ([#4082](../../pull/4082))
+* OWTestLearners: Vertically align to center ([#4095](../../pull/4095))
+* Model's data_to_model_domain supports sparse matrix ([#4081](../../pull/4081))
+* Color widget failed after removing Variable.make ([#4041](../../pull/4041))
+* Deprecated processEvents argument in Test&Score ([#4047](../../pull/4047))
+* Merge data: Rename variables with duplicated names ([#4076](../../pull/4076))
+* k-Means: Impute missing values ([#4068](../../pull/4068))
+* Predictions: Handle discrete target with no values ([#4066](../../pull/4066))
+* Fix storing and retrieving selection, and unconditional auto commit ([#3957](../../pull/3957))
+* Scatterplot: Enable/disable vizrank button ([#4016](../../pull/4016))
+* Correlations: Add progress bar, retain responsiveness ([#4011](../../pull/4011))
+
+
+[3.23.1] - 2019-10-03
+--------------------
+##### Bugfixes
+* Addons install with conda by default
+
+
+[3.23.0] - 2019-09-05
+--------------------
+##### Enhancements
+* Pull YAML feed of notifications on startup, refactor notifications ([#3933](../../pull/3933))
+* Widget for Self-Organizing Maps ([#3928](../../pull/3928))
+* DBSCAN widget ([#3917](../../pull/3917))
+* BoxPlot: Write the anova/t-test statistic onto the plot. ([#3945](../../pull/3945))
+* Feature Constructor: Easier categorical features, allow creation of date/time, easier use of string data ([#3936](../../pull/3936))
+* Merge data allows matching by multiple pairs of columns ([#3919](../../pull/3919))
+* Sticky graphics header/footer views ([#3930](../../pull/3930))
+* Shiny renewed widget Distributions ([#3896](../../pull/3896))
+* Calibration plot (add performance curves) and a new Calibrated Learner widget ([#3881](../../pull/3881))
+* Added Specificity as a new score in Test&Score ([#3907](../../pull/3907))
+* Separate canvas and base widget ([#3772](../../pull/3772))
+
+##### Bugfixes
+* Conda Installer: Restore compatibility with latest anaconda python ([#4004](../../pull/4004))
+* Scatter plot: Hidden variables fix ([#3985](../../pull/3985))
+* Boxplot fix ([#3983](../../pull/3983))
+* Heat map: Cannot cluster a single instance ([#3980](../../pull/3980))
+* Test and Score: Sort numerically, not alphabetically ([#3951](../../pull/3951))
+* OWProjectionWidgetBase: Update when domain is changed ([#3946](../../pull/3946))
+* Change normalization to Scaling in SVM ([#3898](../../pull/3898))
+* Restore usage tracking ([#3921](../../pull/3921))
+* main: Fix widget settings directory path to clear ([#3932](../../pull/3932))
+* Backcompatibility stubs ([#3926](../../pull/3926))
+* OWNeighbours fix manual apply for some options ([#3911](../../pull/3911))
+* Documentation links ([#3897](../../pull/3897))
+* Update output on new input, even if auto commit is disabled ([#3844](../../pull/3844))
+
+
+[3.22.0] - 2019-06-26
+--------------------
+##### Enhancements
+* Unified clustering API ([#3814](../../pull/3814))
+* t-SNE: Load openTSNE lazily" ([#3894](../../pull/3894))
+* Replace popups with non-intrusive notifications ([#3855](../../pull/3855))
+* CSV File Import widget ([#3876](../../pull/3876))
+* t-SNE: Load openTSNE lazily ([#3883](../../pull/3883))
+* Faster drawing in scatterplot ([#3871](../../pull/3871))
+* Mosaic: Wrap legend ([#3866](../../pull/3866))
+* Add conditions for all variables, or all numeric or textual variables ([#3836](../../pull/3836))
+* Shared namespaces for PythonScript widgets ([#3840](../../pull/3840))
+* Pivot: New widget ([#3823](../../pull/3823))
+* Reset settings button ([#3795](../../pull/3795))
+* WebviewWidget: expose JavaScript timeout limit ([#3811](../../pull/3811))
+
+##### Bugfixes
+* OWLinearProjection: limit axis ([#3885](../../pull/3885))
+* Development readme ([#3889](../../pull/3889))
+* OWRadviz: limit number of vars in RadvizVizRank ([#3886](../../pull/3886))
+* OWCreateClass: Reuse variables created with same settings ([#3868](../../pull/3868))
+* DistMatrix should return numpy datatypes ([#3865](../../pull/3865))
+* OWRadviz: legible axis labels ([#3809](../../pull/3809))
+* util: Fix bincount for object arrays ([#3831](../../pull/3831))
+* condainstall: Fix env for running conda ([#3843](../../pull/3843))
+* DBSCAN: Fix predicted labels ([#3833](../../pull/3833))
+* Rare quickmenu crash fix ([#3832](../../pull/3832))
+* OWWidget: Fix an error on mouse press when widget has no basic layout ([#3821](../../pull/3821))
+* VerticalItemDelegate: Do not cut long vertical labels ([#3803](../../pull/3803))
+* Minor improvements to pythagorean trees ([#3777](../../pull/3777))
+* owmds: Fix test for error display/activate ([#3813](../../pull/3813))
+
+
+[3.21.0] - 2019-05-20
+---------------------
+##### Enhancements
+* Error Animations ([#3788](../../pull/3788))
+* OWTSNE: Offload computation to separate thread ([#3604](../../pull/3604))
+* OWDistributions: add cumulative distribution ([#3766](../../pull/3766))
+* Edit Domain: Merge categorical values ([#3725](../../pull/3725))
+* Transform: Values of primitive variables as feature names ([#3721](../../pull/3721))
+* k-Means: Output centroid labels ([#3695](../../pull/3695))
+* Support sparse Jaccard ([#3657](../../pull/3657))
+* Offload work to a separate thread ([#3627](../../pull/3627))
+* Correlations: Enhancements and fixes ([#3660](../../pull/3660))
+* DomainEditor: Indicate changed variables with bold face font ([#3576](../../pull/3576))
+* OWPythonScript: dropping and pasting of python scripts ([#3611](../../pull/3611))
+* Improve Save widget's gui ([#3545](../../pull/3545))
+* Table.from_numpy: Replace infs with nans. ([#3624](../../pull/3624))
+* FDR: Calculate FDR using numpy ([#3625](../../pull/3625))
+* Correlations: fixes and enhancements ([#3591](../../pull/3591))
+* Preprocess: implement Select Relevant Feature's percentile ([#3588](../../pull/3588))
+* Added keyboard shortcuts for Align & Freeze/Unfreeze  ([#3601](../../pull/3601))
+* PCA: Remove SVD & add normalization for sparse ([#3581](../../pull/3581))
+* OwLouvain: Add normalize data checkbox to PCA preprocessing ([#3573](../../pull/3573))
+* Use %g (including sci notation) if number of decimals is not set ([#3574](../../pull/3574))
+* PCA: Preserve f32s & reduce memory footprint when computing means ([#3582](../../pull/3582))
+
+##### Bugfixes
+* OWLinePlot: legible bottom axis labels ([#3768](../../pull/3768))
+* OWPythagorasTree: Enable node selection from forests with categorical variables. ([#3775](../../pull/3775))
+* canvas/help: Fix a NameError in exception handler ([#3759](../../pull/3759))
+* ProjectionWidgetTestMixin: Fix test_plot_once ([#3738](../../pull/3738))
+* LinearProjectionVizRank: Add a necessary check ([#3732](../../pull/3732))
+* stats: Fix statistics for primitive variables ([#3722](../../pull/3722))
+* SQL Table: Restore selected table from settings ([#3703](../../pull/3703))
+* OWAnchorProjectionWidget: Retain valid_data when reloading dataset ([#3718](../../pull/3718))
+* Compatibility with Logitech's Smart Move ([#3702](../../pull/3702))
+* OWTable: Don't set selection when there is no data on input ([#3693](../../pull/3693))
+* Save Data: Remove extra file extensions ([#3700](../../pull/3700))
+* owheatmap: Fix group label size policy ([#3688](../../pull/3688))
+* Test & Score: hide warnings for hidden scores. ([#3676](../../pull/3676))
+* VizRankDialog: Use extended thread pool to prevent segfaults ([#3669](../../pull/3669))
+* Send usage statistics in a thread at startup ([#3632](../../pull/3632))
+* Transform: Replace 'Preprocess' input with 'Template Data' input ([#3673](../../pull/3673))
+* OWTable: Include attributes from meta attributes in header row labels ([#3633](../../pull/3633))
+* OWSieve: Fix operators in tooltips ([#3602](../../pull/3602))
+* MDS: Handle subset data ([#3620](../../pull/3620))
+* migrate_context: widgets crash when migrating context without version ([#3603](../../pull/3603))
+* Louvain clustering fails when Table or ndarray on input. ([#3618](../../pull/3618))
+* Orange: add more informatino on missing compiled libraries ([#3614](../../pull/3614))
+* LinearProjection: Disable LDA for less than three classes ([#3615](../../pull/3615))
+* Orange restart dialogs: Improve wording ([#3605](../../pull/3605))
+* OWDistances: Use only binary features for Jaccard distance ([#3569](../../pull/3569))
+* ScatterplotGraph: Use mapToView instead of mapRectFromParent ([#3571](../../pull/3571))
+* MDS: Fix crashes when feeding column distances ([#3583](../../pull/3583))
+* Naive Bayes: Ignore existing classes in Laplacian smoothing ([#3575](../../pull/3575))
+
+
+[3.20.1] - 2019-02-12
+--------------------
+##### Enhancements
+* t-SNE: Add Normalize data checkbox ([#3570](../../pull/3570))
+* Louvain show number of clusters ([#3572](../../pull/3572))
+
+##### Bugfixes
+* t-SNE speed-ups ([#3592](../../pull/3592))
+* setup.py: Specify python-louvain version constraint ([#3587](../../pull/3587))
+
+
+[3.20.0] - 2019-02-01
+--------------------
+##### Enhancements
+* Naive Bayes: Implement predict, fix predict_storage ([#3540](../../pull/3540))
+* OWTransform: add option to keep original data #3526 ([#3549](../../pull/3549))
+* Implement better randomized PCA ([#3532](../../pull/3532))
+* Scatterplot: Draw separate regression lines for colors; add orthonormal regression ([#3518](../../pull/3518))
+* Edit Domain: Add support for ordered categorical variables ([#3535](../../pull/3535))
+* Warn when data subset is unrelated to data ([#3507](../../pull/3507))
+* Label subset ([#3506](../../pull/3506))
+* OWLouvain: Ensure deterministic clustering ([#3492](../../pull/3492))
+* t-SNE: Updates 2. ([#3475](../../pull/3475))
+* Save Data: Support saving to Excel ([#3453](../../pull/3453))
+* OWLinePlot: Move from prototypes to core ([#3440](../../pull/3440))
+
+##### Bugfixes
+* Warning about a window title without a placeholder ([#3554](../../pull/3554))
+* PaintData: Fix control area width ([#3560](../../pull/3560))
+* OWWidget: Remove wheelEvent reimplementation ([#3557](../../pull/3557))
+* Data sets: Remove class from 'bupa' ([#3556](../../pull/3556))
+* Neighbours: Show error when data and reference have different domain. ([#3547](../../pull/3547))
+* Feature statistics fixes ([#3480](../../pull/3480))
+* Removed header types and flags from .csv and .tab ([#3427](../../pull/3427))
+* Python script widget: prevent data loss  ([#3529](../../pull/3529))
+* setup.cfg: Change the default for with-htmlhelp config option ([#3536](../../pull/3536))
+* Don't add miniconda to path and register as system python ([#3525](../../pull/3525))
+* OWDataProjectionWidget: check validity, fix sparse data reloading ([#3485](../../pull/3485))
+* OWMergeData removes table meta attributes ([#3474](../../pull/3474))
+* [MNT] Remove segfault in tests for building documentation ([#3491](../../pull/3491))
+* OWFeatureStatistics: Fix scipy.stats.mode crash on sparse data ([#3488](../../pull/3488))
+* OWDataProjectionWidget: Fix applying selection ([#3466](../../pull/3466))
 
 
 [3.19.0] - 2018-12-11
@@ -995,7 +1639,30 @@ Change Log
 * Initial version based on Python 1.5.2 and Qt 2.3
 
 
-[next]: https://github.com/biolab/orange3/compare/3.19.0...HEAD
+[next]: https://github.com/biolab/orange3/compare/3.31.1...HEAD
+[3.31.1]: https://github.com/biolab/orange3/compare/3.31.0...3.31.1
+[3.31.0]: https://github.com/biolab/orange3/compare/3.30.2...3.31.0
+[3.30.2]: https://github.com/biolab/orange3/compare/3.30.1...3.30.2
+[3.30.1]: https://github.com/biolab/orange3/compare/3.30.0...3.30.1
+[3.30.0]: https://github.com/biolab/orange3/compare/3.29.3...3.30.0
+[3.29.3]: https://github.com/biolab/orange3/compare/3.29.2...3.29.3
+[3.29.2]: https://github.com/biolab/orange3/compare/3.29.1...3.29.2
+[3.29.1]: https://github.com/biolab/orange3/compare/3.29.0...3.29.1
+[3.29.0]: https://github.com/biolab/orange3/compare/3.28.0...3.29.0
+[3.28.0]: https://github.com/biolab/orange3/compare/3.27.1...3.28.0
+[3.27.1]: https://github.com/biolab/orange3/compare/3.27.0...3.27.1
+[3.27.0]: https://github.com/biolab/orange3/compare/3.26.0...3.27.0
+[3.26.0]: https://github.com/biolab/orange3/compare/3.25.1...3.26.0
+[3.25.1]: https://github.com/biolab/orange3/compare/3.25.0...3.25.1
+[3.25.0]: https://github.com/biolab/orange3/compare/3.24.1...3.25.0
+[3.24.1]: https://github.com/biolab/orange3/compare/3.24.0...3.24.1
+[3.24.0]: https://github.com/biolab/orange3/compare/3.23.1...3.24.0
+[3.23.1]: https://github.com/biolab/orange3/compare/3.23.0...3.23.1
+[3.23.0]: https://github.com/biolab/orange3/compare/3.22.0...3.23.0
+[3.22.0]: https://github.com/biolab/orange3/compare/3.21.0...3.22.0
+[3.21.0]: https://github.com/biolab/orange3/compare/3.20.1...3.21.0
+[3.20.1]: https://github.com/biolab/orange3/compare/3.20.0...3.20.1
+[3.20.0]: https://github.com/biolab/orange3/compare/3.19.0...3.20.0
 [3.19.0]: https://github.com/biolab/orange3/compare/3.18.0...3.19.0
 [3.18.0]: https://github.com/biolab/orange3/compare/3.17.0...3.18.0
 [3.17.0]: https://github.com/biolab/orange3/compare/3.16.0...3.17.0

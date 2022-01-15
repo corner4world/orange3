@@ -11,7 +11,11 @@ Here we need to copy the getting started guide.
    :maxdepth: 1
 
    loading-your-data/index
-
+   building-workflows/index
+   exporting-models/index
+   exporting-visualizations/index
+   learners-as-scorers/index
+   report/index
 
 Widgets
 =======
@@ -23,10 +27,12 @@ Data
    :maxdepth: 1
 
    widgets/data/file
+   widgets/data/csvfileimport
    widgets/data/datasets
    widgets/data/sqltable
    widgets/data/save
    widgets/data/datainfo
+   widgets/data/aggregatecolumns
    widgets/data/datatable
    widgets/data/selectcolumns
    widgets/data/selectrows
@@ -34,11 +40,13 @@ Data
    widgets/data/transpose
    widgets/data/discretize
    widgets/data/continuize
+   widgets/data/createinstance
    widgets/data/createclass
    widgets/data/randomize
    widgets/data/concatenate
    widgets/data/select-by-data-index
    widgets/data/paintdata
+   widgets/data/pivot
    widgets/data/pythonscript
    widgets/data/featureconstructor
    widgets/data/editdomain
@@ -46,12 +54,16 @@ Data
    widgets/data/mergedata
    widgets/data/outliers
    widgets/data/preprocess
-   widgets/data/transform
+   widgets/data/applydomain
    widgets/data/purgedomain
    widgets/data/rank
    widgets/data/correlations
    widgets/data/color
    widgets/data/featurestatistics
+   widgets/data/melt
+   widgets/data/neighbors
+   widgets/data/unique
+   widgets/data/groupby
 
 
 Visualize
@@ -61,9 +73,12 @@ Visualize
    :maxdepth: 1
 
    widgets/visualize/boxplot
+   widgets/visualize/violinplot
    widgets/visualize/distributions
    widgets/visualize/heatmap
    widgets/visualize/scatterplot
+   widgets/visualize/lineplot
+   widgets/visualize/barplot
    widgets/visualize/venndiagram
    widgets/visualize/linearprojection
    widgets/visualize/sievediagram
@@ -86,19 +101,40 @@ Model
 
    widgets/model/constant
    widgets/model/cn2ruleinduction
+   widgets/model/calibratedlearner
    widgets/model/knn
    widgets/model/tree
    widgets/model/randomforest
+   widgets/model/gradientboosting
    widgets/model/svm
    widgets/model/linearregression
    widgets/model/logisticregression
    widgets/model/naivebayes
    widgets/model/adaboost
+   widgets/model/curvefit
    widgets/model/neuralnetwork
    widgets/model/stochasticgradient
    widgets/model/stacking
    widgets/model/loadmodel
    widgets/model/savemodel
+
+
+Evaluate
+--------
+
+.. toctree::
+   :maxdepth: 1
+
+   widgets/evaluate/calibrationplot
+   widgets/evaluate/confusionmatrix
+   widgets/evaluate/liftcurve
+   widgets/evaluate/predictions
+   widgets/evaluate/rocanalysis
+   widgets/evaluate/testandscore
+
+
+.. toctree::
+   :maxdepth: 1
 
 
 Unsupervised
@@ -116,28 +152,11 @@ Unsupervised
    widgets/unsupervised/distancefile
    widgets/unsupervised/savedistancematrix
    widgets/unsupervised/hierarchicalclustering
-   widgets/unsupervised/kmeansclustering
+   widgets/unsupervised/kmeans
    widgets/unsupervised/louvainclustering
+   widgets/unsupervised/DBSCAN
    widgets/unsupervised/mds
    widgets/unsupervised/tsne
    widgets/unsupervised/manifoldlearning
-   
-
-Evaluation
-----------
-
-.. toctree::
-   :maxdepth: 1
-
-   widgets/evaluation/calibrationplot
-   widgets/evaluation/confusionmatrix
-   widgets/evaluation/liftcurve
-   widgets/evaluation/predictions
-   widgets/evaluation/rocanalysis
-   widgets/evaluation/testandscore
-
-
-.. toctree::
-   :maxdepth: 1
-
+   widgets/unsupervised/selforganizingmap
 

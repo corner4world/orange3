@@ -39,9 +39,8 @@ class OWLinearRegression(OWBaseLearner):
     reg_type = settings.Setting(OLS)
     alpha_index = settings.Setting(0)
     l2_ratio = settings.Setting(0.5)
+    fit_intercept = settings.Setting(True)
     autosend = settings.Setting(True)
-
-    want_main_area = False
 
     alphas = list(chain([x / 10000 for x in range(1, 10)],
                         [x / 1000 for x in range(1, 20)],
@@ -52,12 +51,17 @@ class OWLinearRegression(OWBaseLearner):
                         range(100, 1001, 100)))
 
     def add_main_layout(self):
+        # this is part of init, pylint: disable=attribute-defined-outside-init
+        box = gui.hBox(self.controlArea, "Parameters")
+        gui.checkBox(box, self, "fit_intercept",
+                     "Fit intercept (unchecking it fixes it to zero)",
+                     callback=self._intercept_changed)
+
         box = gui.hBox(self.controlArea, "Regularization")
         gui.radioButtons(box, self, "reg_type",
                          btnLabels=self.REGULARIZATION_TYPES,
                          callback=self._reg_type_changed)
 
-        gui.separator(box, 20, 20)
         self.alpha_box = box2 = gui.vBox(box, margin=10)
         gui.widgetLabel(box2, "Regularization strength:")
         gui.hSlider(
@@ -69,14 +73,13 @@ class OWLinearRegression(OWBaseLearner):
         self.alpha_label = gui.widgetLabel(box3, "")
         self._set_alpha_label()
 
-        gui.separator(box2, 10, 10)
         box4 = gui.vBox(box2, margin=0)
         gui.widgetLabel(box4, "Elastic net mixing:")
         box5 = gui.hBox(box4)
         gui.widgetLabel(box5, "L1")
         self.l2_ratio_slider = gui.hSlider(
             box5, self, "l2_ratio", minValue=0.01, maxValue=0.99,
-            intOnly=False, ticks=0.1, createLabel=False, width=120,
+            intOnly=False, createLabel=False, width=120,
             step=0.01, callback=self._l2_ratio_changed)
         gui.widgetLabel(box5, "L2")
         self.l2_ratio_label = gui.widgetLabel(
@@ -91,7 +94,7 @@ class OWLinearRegression(OWBaseLearner):
         self.controls.alpha_index.setEnabled(self.reg_type != self.OLS)
         self.l2_ratio_slider.setEnabled(self.reg_type == self.Elastic)
 
-    def handleNewSignals(self):
+    def _intercept_changed(self):
         self.apply()
 
     def _reg_type_changed(self):
@@ -117,7 +120,8 @@ class OWLinearRegression(OWBaseLearner):
     def create_learner(self):
         alpha = self.alphas[self.alpha_index]
         preprocessors = self.preprocessors
-        args = {"preprocessors": preprocessors}
+        args = dict(preprocessors=preprocessors,
+                    fit_intercept=self.fit_intercept)
         if self.reg_type == OWLinearRegression.OLS:
             learner = LinearRegressionLearner(**args)
         elif self.reg_type == OWLinearRegression.Ridge:
@@ -134,12 +138,13 @@ class OWLinearRegression(OWBaseLearner):
         coef_table = None
         if self.model is not None:
             domain = Domain(
-                [ContinuousVariable("coef", number_of_decimals=7)],
-                metas=[StringVariable("name")])
-            coefs = [self.model.intercept] + list(self.model.coefficients)
-            names = ["intercept"] + \
-                    [attr.name for attr in self.model.domain.attributes]
-            coef_table = Table(domain, list(zip(coefs, names)))
+                [ContinuousVariable("coef")], metas=[StringVariable("name")])
+            coefs = list(self.model.coefficients)
+            names = [attr.name for attr in self.model.domain.attributes]
+            if self.fit_intercept:
+                coefs.insert(0, self.model.intercept)
+                names.insert(0, "intercept")
+            coef_table = Table.from_list(domain, list(zip(coefs, names)))
             coef_table.name = "coefficients"
         self.Outputs.coefficients.send(coef_table)
 
@@ -157,7 +162,10 @@ class OWLinearRegression(OWBaseLearner):
                               .format(self.alphas[self.alpha_index],
                                       self.l2_ratio,
                                       1 - self.l2_ratio))
-        return ("Regularization", regularization),
+        return (
+            ("Regularization", regularization),
+            ("Fit intercept", ["No", "Yes"][self.fit_intercept])
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

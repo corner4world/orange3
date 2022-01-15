@@ -1,3 +1,6 @@
+# This module defines abstract base classes; derived classes are abstract, too
+# pylint: disable=abstract-method
+
 import numpy as np
 import sklearn.metrics as skl_metrics
 
@@ -13,9 +16,11 @@ from Orange.statistics import util
 # TODO this *private* function is called from several widgets to prepare
 # data for calling the below classes. After we (mostly) stopped relying
 # on sklearn.metrics, this is (mostly) unnecessary
+# Afterwards, also remove the following line:
+# pylint: disable=redefined-outer-name
 def _preprocess(table, impute=True):
     """Remove categorical attributes and impute missing values."""
-    if not len(table):
+    if not len(table):  # this can be an array, pylint: disable=len-as-condition
         return table
     new_domain = Domain(
         [a for a in table.domain.attributes if a.is_continuous],
@@ -29,14 +34,30 @@ def _preprocess(table, impute=True):
 
 # TODO I have put this function here as a substitute the above `_preprocess`.
 # None of them really belongs here; (re?)move them, eventually.
-def remove_discrete_features(data):
+def remove_discrete_features(data, to_metas=False):
     """Remove discrete columns from the data."""
     new_domain = Domain(
         [a for a in data.domain.attributes if a.is_continuous],
         data.domain.class_vars,
-        data.domain.metas)
+        data.domain.metas
+        + (() if not to_metas
+           else tuple(a for a in data.domain.attributes if not a.is_continuous))
+    )
     return data.transform(new_domain)
 
+
+def remove_nonbinary_features(data, to_metas=False):
+    """Remove non-binary columns from the data."""
+    new_domain = Domain(
+        [a for a in data.domain.attributes
+         if a.is_discrete and len(a.values) == 2],
+        data.domain.class_vars,
+        data.domain.metas +
+        (() if not to_metas
+         else tuple(a for a in data.domain.attributes
+               if not (a.is_discrete and len(a.values) == 2))
+         if to_metas else ()))
+    return data.transform(new_domain)
 
 def impute(data):
     """Impute missing values."""
@@ -102,6 +123,8 @@ class Distance:
         impute (bool):
             if `True` (default is `False`), nans in the computed distances
             are replaced with zeros, and infs with very large numbers.
+        callback (callable or None):
+            callback function
 
     Attributes:
         axis (int):
@@ -110,6 +133,9 @@ class Distance:
         impute (bool):
             if `True` (default is `False`), nans in the computed distances
             are replaced with zeros, and infs with very large numbers.
+        normalize (bool):
+            if `True`, columns are normalized before computation. This attribute
+            applies only if the distance supports normalization.
 
     The capabilities of the metrics are described with class attributes.
 
@@ -140,10 +166,17 @@ class Distance:
     supports_normalization = False
     supports_missing = True
 
-    def __new__(cls, e1=None, e2=None, axis=1, impute=False, **kwargs):
+    # Predefined here to silence pylint, which doesn't look into __new__
+    normalize = False
+    axis = 1
+    impute = False
+
+    def __new__(cls, e1=None, e2=None, axis=1, impute=False,
+                callback=None, **kwargs):
         self = super().__new__(cls)
         self.axis = axis
         self.impute = impute
+        self.callback = callback
         # Ugly, but needed to allow allow setting subclass-specific parameters
         # (such as normalize) when `e1` is not `None` and the `__new__` in the
         # subclass is skipped
@@ -158,16 +191,25 @@ class Distance:
                 or hasattr(e1, "is_sparse") and e1.is_sparse()):
             fallback = getattr(self, "fallback", None)
             if fallback is not None:
-                # pylint disable=not-callable
+                # pylint: disable=not-callable
                 return fallback(e1, e2, axis, impute)
 
         # Magic constructor
         model = self.fit(e1)
         return model(e1, e2)
 
-    def fit(self, e1):
-        """Abstract method returning :obj:`DistanceModel` fit to the data"""
-        pass
+    def fit(self, data):
+        """
+        Abstract method returning :obj:`DistanceModel` fit to the data
+
+        Args:
+            e1 (Orange.data.Table, Orange.data.Instance, np.ndarray):
+                data for fitting the distance model
+
+        Returns:
+            model (DistanceModel)
+        """
+        raise NotImplementedError
 
     @staticmethod
     def check_no_discrete(n_vals):
@@ -194,11 +236,14 @@ class DistanceModel:
         impute (bool):
             if `True` (default is `False`), nans in the computed distances
             are replaced with zeros, and infs with very large numbers
+        callback (callable or None):
+            callback function
 
     """
-    def __init__(self, axis, impute=False):
+    def __init__(self, axis, impute=False, callback=None):
         self._axis = axis
         self.impute = impute
+        self.callback = callback
 
     @property
     def axis(self):
@@ -232,20 +277,21 @@ class DistanceModel:
 
         x1 = _orange_to_numpy(e1)
         x2 = _orange_to_numpy(e2)
-        dist = self.compute_distances(x1, x2)
-        if self.impute and np.isnan(dist).any():
-            dist = np.nan_to_num(dist)
-        if isinstance(e1, (Table, RowInstance)):
-            dist = DistMatrix(dist, e1, e2, self.axis)
-        else:
-            dist = DistMatrix(dist)
-        return dist
+        with np.errstate(invalid="ignore"):  # nans are handled below
+            dist = self.compute_distances(x1, x2)
+            if self.impute and np.isnan(dist).any():
+                dist = np.nan_to_num(dist)
+            if isinstance(e1, (Table, RowInstance)):
+                dist = DistMatrix(dist, e1, e2, self.axis)
+            else:
+                dist = DistMatrix(dist)
+            return dist
 
     def compute_distances(self, x1, x2):
         """
         Abstract method for computation of distances between rows or columns of
         `x1`, or between rows of `x1` and `x2`. Do not call directly."""
-        pass
+        raise NotImplementedError
 
 
 class FittedDistanceModel(DistanceModel):
@@ -257,14 +303,21 @@ class FittedDistanceModel(DistanceModel):
         attributes (list of `Variable`): attributes on which the model was fit
         discrete (np.ndarray): bool array indicating discrete attributes
         continuous (np.ndarray): bool array indicating continuous attributes
+        normalize (bool):
+            if `True` (default is `False`) continuous columns are normalized
+        callback (callable or None): callback function
     """
-    def __init__(self, attributes, axis=1, impute=False):
-        super().__init__(axis, impute)
+    def __init__(self, attributes, axis=1, impute=False, callback=None):
+        super().__init__(axis, impute, callback)
         self.attributes = attributes
+        self.discrete = None
+        self.continuous = None
+        self.normalize = False
 
     def __call__(self, e1, e2=None):
-        if e1.domain.attributes != self.attributes or \
-                    e2 is not None and e2.domain.attributes != self.attributes:
+        if self.attributes is not None and (
+                e1.domain.attributes != self.attributes
+                or e2 is not None and e2.domain.attributes != self.attributes):
             raise ValueError("mismatching domains")
         return super().__call__(e1, e2)
 
@@ -338,12 +391,17 @@ class FittedDistance(Distance):
         Prepare the data on attributes, call `fit_cols` or `fit_rows` and
         return the resulting model.
         """
-        attributes = data.domain.attributes
         x = _orange_to_numpy(data)
-        n_vals = np.fromiter(
-            (len(attr.values) if attr.is_discrete else 0
-             for attr in attributes),
-            dtype=np.int32, count=len(attributes))
+        if hasattr(data, "domain"):
+            attributes = data.domain.attributes
+            n_vals = np.fromiter(
+                (len(attr.values) if attr.is_discrete else 0
+                 for attr in attributes),
+                dtype=np.int32, count=len(attributes))
+        else:
+            assert isinstance(x, np.ndarray)
+            attributes = None
+            n_vals = np.zeros(x.shape[1], dtype=np.int32)
         return [self.fit_cols, self.fit_rows][self.axis](attributes, x, n_vals)
 
     def fit_cols(self, attributes, x, n_vals):
@@ -356,7 +414,7 @@ class FittedDistance(Distance):
             x (np.ndarray): data
             n_vals (np.ndarray): number of attribute values, 0 for continuous
         """
-        pass
+        raise NotImplementedError
 
     def fit_rows(self, attributes, x, n_vals):
         """
@@ -421,9 +479,11 @@ class FittedDistance(Distance):
             continuous, discrete,
             offsets[:curr_cont], scales[:curr_cont],
             dist_missing2_cont[:curr_cont],
-            dist_missing_disc, dist_missing2_disc)
+            dist_missing_disc, dist_missing2_disc,
+            self.callback)
 
-    def get_discrete_stats(self, column, n_bins):
+    @staticmethod
+    def get_discrete_stats(column, n_bins):
         """
         Return tables used computing distance between missing discrete values.
 
@@ -457,7 +517,7 @@ class FittedDistance(Distance):
             dist_missing2_cont (float): the value used for distance between two
                 missing values in column
         """
-        pass
+        raise NotImplementedError
 
 
 # Fallbacks for distances in sparse data

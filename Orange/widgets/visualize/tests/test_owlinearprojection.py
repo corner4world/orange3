@@ -5,7 +5,7 @@ import numpy as np
 
 from AnyQt.QtCore import QItemSelectionModel
 
-from Orange.data import Table, Domain, DiscreteVariable
+from Orange.data import Table, Domain, DiscreteVariable, ContinuousVariable
 from Orange.widgets.settings import Context
 from Orange.widgets.tests.base import (
     WidgetTest, WidgetOutputsTestMixin, datasets,
@@ -13,9 +13,9 @@ from Orange.widgets.tests.base import (
 )
 from Orange.widgets.tests.utils import simulate
 from Orange.widgets.visualize.owlinearprojection import (
-    OWLinearProjection, LinearProjectionVizRank
+    OWLinearProjection, LinearProjectionVizRank, Placement
 )
-from Orange.widgets.visualize.utils import Worker
+from Orange.widgets.visualize.utils import run_vizrank
 
 
 class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
@@ -38,8 +38,9 @@ class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
         simulate.combobox_run_through_all(self.widget.controls.attr_color)
         simulate.combobox_run_through_all(self.widget.controls.attr_size)
 
-        data.X[:, 0] = np.nan
-        data.Y[:] = np.nan
+        with data.unlocked():
+            data.X[:, 0] = np.nan
+            data.Y[:] = np.nan
         self.send_signal(self.widget.Inputs.data, data)
         self.send_signal(self.widget.Inputs.data_subset, data[2:3])
         simulate.combobox_run_through_all(self.widget.controls.attr_color)
@@ -73,7 +74,7 @@ class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
         data = Table("iris")[:20]
         domain = data.domain
         domain = Domain(
-            attributes=domain.attributes[:4], class_vars=DiscreteVariable("class", values=["a"]))
+            attributes=domain.attributes[:4], class_vars=DiscreteVariable("class", values=("a", )))
         data = Table.from_numpy(domain=domain, X=data.X, Y=data.Y)
         self.assertTrue(w.radio_placement.buttons[1].isEnabled())
         self.send_signal(w.Inputs.data, data)
@@ -82,12 +83,12 @@ class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
     def test_no_data_for_lda(self):
         buttons = self.widget.radio_placement.buttons
         self.send_signal(self.widget.Inputs.data, self.data)
-        self.widget.radio_placement.buttons[self.widget.Placement.LDA].click()
-        self.assertTrue(buttons[self.widget.Placement.LDA].isEnabled())
+        self.widget.radio_placement.buttons[Placement.LDA].click()
+        self.assertTrue(buttons[Placement.LDA].isEnabled())
         self.send_signal(self.widget.Inputs.data, Table("housing"))
-        self.assertFalse(buttons[self.widget.Placement.LDA].isEnabled())
+        self.assertFalse(buttons[Placement.LDA].isEnabled())
         self.send_signal(self.widget.Inputs.data, None)
-        self.assertTrue(buttons[self.widget.Placement.LDA].isEnabled())
+        self.assertTrue(buttons[Placement.LDA].isEnabled())
 
     def test_data_no_cont_features(self):
         data = Table("titanic")
@@ -99,7 +100,7 @@ class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
 
     def test_radius(self):
         self.send_signal(self.widget.Inputs.data, self.data)
-        self.widget.radio_placement.buttons[self.widget.Placement.LDA].click()
+        self.widget.radio_placement.buttons[Placement.LDA].click()
         self.widget.controls.graph.hide_radius.setValue(5)
 
     def test_invalid_data(self):
@@ -107,8 +108,9 @@ class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
             self.send_signal(self.widget.Inputs.data, data)
             self.assertEqual(is_shown, self.widget.Error.no_valid_data.is_shown())
 
-        data = Table("iris")[::30]
-        data[:, 0] = np.nan
+        data = Table("iris")[::30].copy()
+        with data.unlocked():
+            data[:, 0] = np.nan
         for data, is_shown in zip([None, data, Table("iris")[:30]], [False, True, False]):
             assertErrorShown(data, is_shown)
 
@@ -148,10 +150,6 @@ class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
         self.assertEqual(w.attr_shape, iris.domain["iris"])
         self.assertEqual(w.attr_size, iris.domain["sepal length"])
 
-    def test_add_variables(self):
-        w = self.widget
-        w.variables_selection.add_remove.buttons[1].click()
-
     def test_set_radius_no_data(self):
         """
         Widget should not crash when there is no data and radius slider is moved.
@@ -161,26 +159,44 @@ class TestOWLinearProjection(WidgetTest, AnchorProjectionWidgetTestMixin,
         w.controls.graph.hide_radius.setSliderPosition(3)
 
     def test_invalidated_model_selected(self):
+        model = self.widget.model_selected
+
         self.widget.setup_plot = Mock()
         self.send_signal(self.widget.Inputs.data, self.data)
         self.widget.setup_plot.assert_called_once()
 
         self.widget.setup_plot.reset_mock()
-        self.widget.model_selected[:] = self.data.domain[2:]
-        self.widget.variables_selection.removed.emit()
+        self.widget.selected_vars[:] = self.data.domain[2:3]
+        model.selection_changed.emit()
         self.widget.setup_plot.assert_called_once()
 
         self.widget.setup_plot.reset_mock()
         self.send_signal(self.widget.Inputs.data, self.data[:, 2:])
         self.widget.setup_plot.assert_not_called()
 
-        self.widget.model_selected[:] = self.data.domain[3:]
-        self.widget.variables_selection.removed.emit()
+        self.widget.selected_vars[:] = [self.data.domain[3]]
+        model.selection_changed.emit()
         self.widget.setup_plot.assert_called_once()
 
         self.widget.setup_plot.reset_mock()
         self.send_signal(self.widget.Inputs.data, self.data)
         self.widget.setup_plot.assert_called_once()
+
+    def test_two_classes_dataset(self):
+        self.widget.radio_placement.buttons[1].click()
+        self.send_signal(self.widget.Inputs.data, Table("heart_disease"))
+        self.assertFalse(self.widget.radio_placement.buttons[1].isEnabled())
+
+    def test_unique_name(self):
+        data = Table("iris")
+        new = ContinuousVariable("C-y")
+        d = Table.from_numpy(Domain(list(data.domain.attributes[:3])+[new],
+                                    class_vars=data.domain.class_vars), data.X,
+                             data.Y)
+        self.send_signal(self.widget.Inputs.data, d)
+        output = self.get_output(self.widget.Outputs.annotated_data)
+        metas = ["C-x (1)", "C-y (1)", "Selected"]
+        self.assertEqual([meta.name for meta in output.domain.metas], metas)
 
 
 class LinProjVizRankTests(WidgetTest):
@@ -199,20 +215,20 @@ class LinProjVizRankTests(WidgetTest):
 
     def test_discrete_class(self):
         self.send_signal(self.widget.Inputs.data, self.data)
-        worker = Worker(self.vizrank)
-        self.vizrank.keep_running = True
-        worker.do_work()
+        run_vizrank(self.vizrank.compute_score,
+                    self.vizrank.iterate_states, None,
+                    [], 0, self.vizrank.state_count(), Mock())
 
     def test_continuous_class(self):
         data = Table("housing")[::100]
         self.send_signal(self.widget.Inputs.data, data)
-        worker = Worker(self.vizrank)
-        self.vizrank.keep_running = True
-        worker.do_work()
+        run_vizrank(self.vizrank.compute_score,
+                    self.vizrank.iterate_states, None,
+                    [], 0, self.vizrank.state_count(), Mock())
 
     def test_set_attrs(self):
         self.send_signal(self.widget.Inputs.data, self.data)
-        model_selected = self.widget.model_selected[:]
+        prev_selected = self.widget.selected_vars[:]
         c1 = self.get_output(self.widget.Outputs.components)
         self.vizrank.toggle()
         self.process_events(until=lambda: not self.vizrank.keep_running)
@@ -221,6 +237,11 @@ class LinProjVizRankTests(WidgetTest):
             self.vizrank.rank_model.item(0, 0).index(),
             QItemSelectionModel.ClearAndSelect
         )
-        self.assertNotEqual(self.widget.model_selected[:], model_selected)
+        self.assertNotEqual(self.widget.selected_vars, prev_selected)
         c2 = self.get_output(self.widget.Outputs.components)
         self.assertNotEqual(c1.domain.attributes, c2.domain.attributes)
+
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()

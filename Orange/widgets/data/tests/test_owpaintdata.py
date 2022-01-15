@@ -4,7 +4,8 @@
 import numpy as np
 import scipy.sparse as sp
 
-from AnyQt.QtCore import QRectF, QPointF
+from AnyQt.QtCore import QRectF, QPointF, QEvent, Qt
+from AnyQt.QtGui import QMouseEvent
 
 from Orange.data import Table, DiscreteVariable, ContinuousVariable, Domain
 from Orange.widgets.data import owpaintdata
@@ -25,7 +26,19 @@ class TestOWPaintData(WidgetTest):
         """No crash on empty data"""
         data = Table("iris")
         self.send_signal(self.widget.Inputs.data, data)
-        self.send_signal(self.widget.Inputs.data, Table(data.domain))
+        self.send_signal(self.widget.Inputs.data,
+                         Table.from_domain(data.domain))
+
+    def test_var_name_duplicates(self):
+        data = Table("iris")
+        self.send_signal(self.widget.Inputs.data, data)
+        self.widget.attr1 = 'atr1'
+        self.widget.attr2 = 'atr1'
+        self.widget._attr_name_changed()
+        self.assertTrue(self.widget.Warning.renamed_vars.is_shown())
+        self.widget.attr2 = 'atr2'
+        self.widget._attr_name_changed()
+        self.assertFalse(self.widget.Warning.renamed_vars.is_shown())
 
     def test_nan_data(self):
         data = datasets.missing_data_2()
@@ -56,7 +69,7 @@ class TestOWPaintData(WidgetTest):
              ContinuousVariable("B")],
             DiscreteVariable("C", values=[chr(ord("a") + i) for i in range(20)])
         )
-        data = Table(domain, [[0.1, 0.2, "a"], [0.4, 0.7, "t"]])
+        data = Table.from_list(domain, [[0.1, 0.2, "a"], [0.4, 0.7, "t"]])
         self.send_signal(self.widget.Inputs.data, data)
 
     def test_sparse_data(self):
@@ -65,8 +78,9 @@ class TestOWPaintData(WidgetTest):
         GH-2298
         GH-2163
         """
-        data = Table("iris")[::25]
-        data.X = sp.csr_matrix(data.X)
+        data = Table("iris")[::25].copy()
+        with data.unlocked():
+            data.X = sp.csr_matrix(data.X)
         self.send_signal(self.widget.Inputs.data, data)
         self.assertTrue(self.widget.Warning.sparse_not_supported.is_shown())
         self.send_signal(self.widget.Inputs.data, None)
@@ -78,3 +92,31 @@ class TestOWPaintData(WidgetTest):
         GH-2399
         """
         self.create_widget(OWPaintData, stored_settings={"data": []})
+
+    def test_reset_to_input(self):
+        """Checks if the data resets to input when Reset to Input is pressed"""
+        data = Table("iris")
+        self.send_signal(self.widget.Inputs.data, data)
+        output = self.get_output(self.widget.Outputs.data)
+        self.assertEqual(len(output), len(data))
+        self.widget.set_current_tool(self.widget.TOOLS[1][2]) # PutInstanceTool
+        tool = self.widget.current_tool
+        event = QMouseEvent(QEvent.MouseButtonPress, QPointF(0.17, 0.17),
+                            Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        tool.mousePressEvent(event)
+        output = self.get_output(self.widget.Outputs.data)
+        self.assertNotEqual(len(output), len(data))
+        self.assertEqual(len(output), 151)
+        self.widget.reset_to_input()
+        output = self.get_output(self.widget.Outputs.data)
+        self.assertEqual(len(output), len(data))
+
+        self.send_signal(self.widget.Inputs.data, data)
+        output = self.get_output(self.widget.Outputs.data)
+        self.assertEqual(len(output), len(data))
+        self.widget.set_current_tool(self.widget.TOOLS[5][2])  # ClearTool
+        output = self.get_output(self.widget.Outputs.data)
+        self.assertIsNone(output)
+        self.widget.reset_to_input()
+        output = self.get_output(self.widget.Outputs.data)
+        self.assertEqual(len(output), len(data))

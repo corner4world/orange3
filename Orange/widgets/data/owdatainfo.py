@@ -2,8 +2,6 @@ from collections import OrderedDict
 import threading
 import textwrap
 
-from AnyQt import QtWidgets
-
 from Orange.widgets import widget, gui
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 from Orange.widgets.widget import Input
@@ -30,6 +28,8 @@ class OWDataInfo(widget.OWWidget):
         data = Input("Data", Table)
 
     want_main_area = False
+    buttons_area_orientation = None
+    resizing_enabled = False
 
     def __init__(self):
         super().__init__()
@@ -39,8 +39,7 @@ class OWDataInfo(widget.OWWidget):
         for box in ("Data Set Name", "Data Set Size", "Features", "Targets",
                     "Meta Attributes", "Location", "Data Attributes"):
             name = box.lower().replace(" ", "_")
-            bo = gui.vBox(self.controlArea, box,
-                          addSpace=False and box != "Meta Attributes")
+            bo = gui.vBox(self.controlArea, box)
             gui.label(bo, self, "%%(%s)s" % name)
 
         # ensure the widget has some decent minimum width.
@@ -52,8 +51,6 @@ class OWDataInfo(widget.OWWidget):
         # override any minimum/fixed size set on `self`).
         self.targets = ""
         self.controlArea.setMinimumWidth(self.controlArea.sizeHint().width())
-        self.layout().setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
-
 
     @Inputs.data
     def data(self, data):
@@ -76,6 +73,8 @@ class OWDataInfo(widget.OWWidget):
         return sum(isinstance(x, tpe) for x in s)
 
     def _set_fields(self, data):
+        # Attributes are defined in a function called from __init__
+        # pylint: disable=attribute-defined-outside-init
         def n_or_none(n):
             return n or "-"
 
@@ -112,12 +111,12 @@ class OWDataInfo(widget.OWWidget):
             sparseness = ""
         self.data_set_size = pack_table((
             ("Rows", '~{}'.format(data.approx_len())),
-            ("Columns", len(domain)+len(domain.metas)))) + sparseness
+            ("Columns", len(domain.variables)+len(domain.metas)))) + sparseness
 
         def update_size():
             self.data_set_size = pack_table((
                 ("Rows", len(data)),
-                ("Columns", len(domain)+len(domain.metas)))) + sparseness
+                ("Columns", len(domain.variables)+len(domain.metas)))) + sparseness
 
         threading.Thread(target=update_size).start()
 
@@ -152,6 +151,8 @@ class OWDataInfo(widget.OWWidget):
             self.data_attributes = ""
 
     def _set_report(self, data):
+        # Attributes are defined in a function called from __init__
+        # pylint: disable=attribute-defined-outside-init
         domain = data.domain
         count = self._count
 

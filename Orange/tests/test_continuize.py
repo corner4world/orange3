@@ -12,8 +12,7 @@ from Orange.tests import test_filename
 
 class TestDomainContinuizer(unittest.TestCase):
     def setUp(self):
-        Variable._clear_all_caches()
-        self.data = Table(test_filename("test4"))
+        self.data = Table(test_filename("datasets/test4"))
 
     def test_default(self):
         for inp in (self.data, self.data.domain):
@@ -28,7 +27,7 @@ class TestDomainContinuizer(unittest.TestCase):
                              ["c1", "c2", "d2=a", "d2=b", "d3=a", "d3=b", "d3=c"])
             self.assertIsInstance(dom[2].compute_value, transformation.Indicator)
 
-            dat2 = Table(dom, self.data)
+            dat2 = self.data.transform(dom)
             # c1 c2  d2    d3       cl1
             self.assertEqual(dat2[0], [1, -2, 1, 0, 1, 0, 0, "a"])
             self.assertEqual(dat2[1], [0, 0, 0, 1, 0, 1, 0, "b"])
@@ -47,7 +46,7 @@ class TestDomainContinuizer(unittest.TestCase):
                              ["c1", "c2", "d2=a", "d2=b", "d3=a", "d3=b", "d3=c"])
             self.assertIsInstance(dom[2].compute_value, transformation.Indicator)
 
-            dat2 = Table(dom, self.data)
+            dat2 = self.data.transform(dom)
             # c1   c2  d2    d3       cl1
             self.assertEqual(dat2[0], [1, -2, 1, 0, 1, 0, 0, 1, 0, 0])
             self.assertEqual(dat2[1], [0, 0, 0, 1, 0, 1, 0, 0, 1, 0])
@@ -68,7 +67,7 @@ class TestDomainContinuizer(unittest.TestCase):
             self.assertIsInstance(dom[2].compute_value,
                                   transformation.Indicator)
 
-            dat2 = Table(dom, self.data)
+            dat2 = self.data.transform(dom)
             # c1 c2  d2    d3       cl1
             self.assertEqual(dat2[0], [1, -2, 1, 0, 1, 0, 0, "a"])
             self.assertEqual(dat2[1], [0, 0, 0, 1, 0, 1, 0, "b"])
@@ -88,31 +87,10 @@ class TestDomainContinuizer(unittest.TestCase):
             self.assertIsInstance(dom[2].compute_value,
                                   transformation.Indicator)
 
-            dat2 = Table(dom, self.data)
+            dat2 = self.data.transform(dom)
             # c1 c2  d2 d3     cl1
             self.assertEqual(dat2[0], [1, -2, 0, 0, 0, "a"])
             self.assertEqual(dat2[1], [0, 0, 1, 1, 0, "b"])
-            self.assertEqual(dat2[2], [2, 2, 1, 0, 1, "c"])
-
-    def test_multi_lowest_base_base(self):
-        self.data.domain[4].base_value = 1
-        for inp in (self.data, self.data.domain):
-            dom = DomainContinuizer(multinomial_treatment=Continuize.FirstAsBase)
-            dom = dom(inp)
-            self.assertTrue(all(attr.is_continuous
-                                for attr in dom.attributes))
-            self.assertIs(dom.class_var, self.data.domain.class_var)
-            self.assertIs(dom[0], self.data.domain[0])
-            self.assertIs(dom[1], self.data.domain[1])
-            self.assertEqual([attr.name for attr in dom.attributes],
-                             ["c1", "c2", "d2=b", "d3=a", "d3=c"])
-            self.assertIsInstance(dom[2].compute_value,
-                                  transformation.Indicator)
-
-            dat2 = Table(dom, self.data)
-            # c1 c2  d2 d3    cl1
-            self.assertEqual(dat2[0], [1, -2, 0, 1, 0, "a"])
-            self.assertEqual(dat2[1], [0, 0, 1, 0, 0, "b"])
             self.assertEqual(dat2[2], [2, 2, 1, 0, 1, "c"])
 
     def test_multi_ignore(self):
@@ -173,7 +151,7 @@ class TestDomainContinuizer(unittest.TestCase):
             self.assertEqual([attr.name for attr in dom.variables],
                              ["c1", "c2", "d2", "d3", "cl1"])
 
-            dat2 = Table(dom, self.data)
+            dat2 = self.data.transform(dom)
             # c1 c2  d2 d3  cl1
             self.assertEqual(dat2[0], [1, -2, 0, 0, "a"])
             self.assertEqual(dat2[1], [0, 0, 1, 1, "b"])
@@ -192,7 +170,7 @@ class TestDomainContinuizer(unittest.TestCase):
             self.assertEqual([attr.name for attr in dom.variables],
                              ["c1", "c2", "d2", "d3", "cl1"])
 
-            dat2 = Table(dom, self.data)
+            dat2 = self.data.transform(dom)
             # c1 c2  d2 d3  cl1
             self.assertEqual(dat2[0], [1, -2, 0, 0, 0])
             self.assertEqual(dat2[1], [0, 0, 1, 1, 1])
@@ -210,7 +188,7 @@ class TestDomainContinuizer(unittest.TestCase):
             self.assertEqual([attr.name for attr in dom.variables],
                              ["c1", "c2", "d2", "d3", "cl1"])
 
-            dat2 = Table(dom, self.data)
+            dat2 = self.data.transform(dom)
             # c1 c2  d2 d3  cl1
             self.assertEqual(dat2[0], [1, -2, 0, 0, "a"])
             self.assertEqual(dat2[1], [0, 0, 1, 0.5, "b"])

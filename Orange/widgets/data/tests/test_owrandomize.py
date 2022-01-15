@@ -1,5 +1,6 @@
 # Test methods with long descriptive names can omit docstrings
-# pylint: disable=missing-docstring
+# pylint: disable=missing-docstring,unsubscriptable-object
+from unittest.mock import patch
 
 import numpy as np
 
@@ -67,8 +68,15 @@ class TestOWRandomize(WidgetTest):
         self.assertTrue((output.Y != self.zoo.Y).any())
         self.assertTrue((np.sort(output.Y, axis=0) ==
                          np.sort(self.zoo.Y, axis=0)).all())
-        self.widget.apply()
+        self.widget.commit.now()
         output2 = self.get_output(self.widget.Outputs.data)
         np.testing.assert_array_equal(output.X, output2.X)
         np.testing.assert_array_equal(output.Y, output2.Y)
         np.testing.assert_array_equal(output.metas, output2.metas)
+
+    def test_unconditional_commit_on_new_signal(self):
+        with patch.object(self.widget.commit, 'now') as apply:
+            self.widget.auto_apply = False
+            apply.reset_mock()
+            self.send_signal(self.widget.Inputs.data, self.zoo)
+            apply.assert_called()

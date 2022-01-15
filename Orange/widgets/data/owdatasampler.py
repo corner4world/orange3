@@ -21,7 +21,7 @@ class OWDataSampler(OWWidget):
                   "from the input dataset."
     icon = "icons/DataSampler.svg"
     priority = 100
-    category = "Data"
+    category = "Transform"
     keywords = ["random"]
 
     _MAX_SAMPLE_SIZE = 2 ** 31 - 1
@@ -40,7 +40,9 @@ class OWDataSampler(OWWidget):
     FixedProportion, FixedSize, CrossValidation, Bootstrap = range(4)
     SqlTime, SqlProportion = range(2)
 
-    use_seed = Setting(False)
+    selectedFold: int
+
+    use_seed = Setting(True)
     replacement = Setting(False)
     stratify = Setting(False)
     sql_dl = Setting(False)
@@ -52,25 +54,36 @@ class OWDataSampler(OWWidget):
     number_of_folds = Setting(10)
     selectedFold = Setting(1)
 
+    # Older versions of the widget had swapped outputs for cross validation
+    # Migrations set this to True for compability with older workflows
+    compatibility_mode = Setting(False, schema_only=True)
+
+    settings_version = 2
+
+    class Information(OWWidget.Information):
+        compatibility_mode = Msg(
+            "Compatibility mode\n"
+            "New versions of widget have swapped outputs for cross validation"
+        )
+
     class Warning(OWWidget.Warning):
         could_not_stratify = Msg("Stratification failed\n{}")
         bigger_sample = Msg('Sample is bigger than input')
 
     class Error(OWWidget.Error):
-        too_many_folds = Msg("Number of folds exceeds data size")
-        sample_larger_than_data = Msg("Sample must be smaller than data")
+        too_many_folds = Msg("Number of subsets exceeds data size")
+        sample_larger_than_data = Msg("Sample can't be larger than data")
         not_enough_to_stratify = Msg("Data is too small to stratify")
         no_data = Msg("Dataset is empty")
 
     def __init__(self):
         super().__init__()
+        if self.compatibility_mode:
+            self.Information.compatibility_mode()
+
         self.data = None
         self.indices = None
         self.sampled_instances = self.remaining_instances = None
-
-        box = gui.vBox(self.controlArea, "Information")
-        self.dataInfoLabel = gui.widgetLabel(box, 'No data on input.')
-        self.outputInfoLabel = gui.widgetLabel(box, ' ')
 
         self.sampling_box = gui.vBox(self.controlArea, "Sampling Type")
         sampling = gui.radioButtons(self.sampling_box, self, "sampling_type",
@@ -86,9 +99,8 @@ class OWDataSampler(OWWidget):
         self.sampleSizePercentageSlider = gui.hSlider(
             gui.indentedBox(sampling), self,
             "sampleSizePercentage",
-            minValue=0, maxValue=99, ticks=10, labelFormat="%d %%",
-            callback=set_sampling_type(self.FixedProportion),
-            addSpace=12)
+            minValue=0, maxValue=100, ticks=10, labelFormat="%d %%",
+            callback=set_sampling_type(self.FixedProportion))
 
         gui.appendRadioButton(sampling, "Fixed sample size")
         ibox = gui.indentedBox(sampling)
@@ -99,16 +111,15 @@ class OWDataSampler(OWWidget):
             controlWidth=90)
         gui.checkBox(
             ibox, self, "replacement", "Sample with replacement",
-            callback=set_sampling_type(self.FixedSize),
-            addSpace=12)
+            callback=set_sampling_type(self.FixedSize))
 
         gui.appendRadioButton(sampling, "Cross validation")
         form = QFormLayout(
             formAlignment=Qt.AlignLeft | Qt.AlignTop,
             labelAlignment=Qt.AlignLeft,
             fieldGrowthPolicy=QFormLayout.AllNonFixedFieldsGrow)
-        ibox = gui.indentedBox(sampling, addSpace=True, orientation=form)
-        form.addRow("Number of folds:",
+        ibox = gui.indentedBox(sampling, orientation=form)
+        form.addRow("Number of subsets:",
                     gui.spin(
                         ibox, self, "number_of_folds", 2, 100,
                         addToLayout=False,
@@ -116,7 +127,8 @@ class OWDataSampler(OWWidget):
         self.selected_fold_spin = gui.spin(
             ibox, self, "selectedFold", 1, self.number_of_folds,
             addToLayout=False, callback=self.fold_changed)
-        form.addRow("Selected fold:", self.selected_fold_spin)
+        form.addRow("Unused subset:" if not self.compatibility_mode
+                    else "Selected subset:", self.selected_fold_spin)
 
         gui.appendRadioButton(sampling, "Bootstrap")
 
@@ -136,7 +148,7 @@ class OWDataSampler(OWWidget):
         spin.setSuffix(" %")
         self.sql_box.setVisible(False)
 
-        self.options_box = gui.vBox(self.controlArea, "Options")
+        self.options_box = gui.vBox(self.controlArea, "Options", addSpaceBefore=False)
         self.cb_seed = gui.checkBox(
             self.options_box, self, "use_seed",
             "Replicable (deterministic) sampling",
@@ -178,16 +190,11 @@ class OWDataSampler(OWWidget):
             self.cb_seed.setVisible(not sql)
             self.cb_stratify.setVisible(not sql)
             self.cb_sql_dl.setVisible(sql)
-            self.dataInfoLabel.setText(
-                '{}{} instances in input dataset.'.format(*(
-                    ('~', dataset.approx_len()) if sql else
-                    ('', len(dataset)))))
+
             if not sql:
                 self._update_sample_max_size()
                 self.updateindices()
         else:
-            self.dataInfoLabel.setText('No data on input.')
-            self.outputInfoLabel.setText('')
             self.indices = None
             self.clear_messages()
         self.commit()
@@ -203,7 +210,6 @@ class OWDataSampler(OWWidget):
         if self.data is None:
             sample = other = None
             self.sampled_instances = self.remaining_instances = None
-            self.outputInfoLabel.setText("")
         elif isinstance(self.data, SqlTable):
             other = None
             if self.sampling_type == self.SqlProportion:
@@ -224,19 +230,17 @@ class OWDataSampler(OWWidget):
             if self.sampling_type in (
                     self.FixedProportion, self.FixedSize, self.Bootstrap):
                 remaining, sample = self.indices
-                self.outputInfoLabel.setText(
-                    'Outputting %d instance%s.' %
-                    (len(sample), "s" * (len(sample) != 1)))
             elif self.sampling_type == self.CrossValidation:
-                remaining, sample = self.indices[self.selectedFold - 1]
-                self.outputInfoLabel.setText(
-                    'Outputting fold %d, %d instance%s.' %
-                    (self.selectedFold, len(sample), "s" * (len(sample) != 1))
-                )
+                if self.compatibility_mode:
+                    remaining, sample = self.indices[self.selectedFold - 1]
+                else:
+                    sample, remaining = self.indices[self.selectedFold - 1]
+
             sample = self.data[sample]
             other = self.data[remaining]
             self.sampled_instances = len(sample)
             self.remaining_instances = len(other)
+
         self.Outputs.data_sample.send(sample)
         self.Outputs.remaining_data.send(other)
 
@@ -263,7 +267,7 @@ class OWDataSampler(OWWidget):
         else:
             assert self.sampling_type == self.Bootstrap
 
-        if not repl and size is not None and (data_length <= size):
+        if not repl and size is not None and (size > data_length):
             self.Error.sample_larger_than_data()
         if not repl and data_length <= num_classes and self.stratify:
             self.Error.not_enough_to_stratify()
@@ -290,19 +294,19 @@ class OWDataSampler(OWWidget):
     def sample(self, data_length, size, stratified):
         rnd = self.RandomSeed if self.use_seed else None
         if self.sampling_type == self.FixedSize:
-            self.indice_gen = SampleRandomN(
+            sampler = SampleRandomN(
                 size, stratified=stratified, replace=self.replacement,
                 random_state=rnd)
         elif self.sampling_type == self.FixedProportion:
-            self.indice_gen = SampleRandomP(
+            sampler = SampleRandomP(
                 self.sampleSizePercentage / 100, stratified=stratified,
                 random_state=rnd)
         elif self.sampling_type == self.Bootstrap:
-            self.indice_gen = SampleBootstrap(data_length, random_state=rnd)
+            sampler = SampleBootstrap(data_length, random_state=rnd)
         else:
-            self.indice_gen = SampleFoldIndices(
+            sampler = SampleFoldIndices(
                 self.number_of_folds, stratified=stratified, random_state=rnd)
-        return self.indice_gen(self.data)
+        return sampler(self.data)
 
     def send_report(self):
         if self.sampling_type == self.FixedProportion:
@@ -317,9 +321,11 @@ class OWDataSampler(OWWidget):
                 if self.replacement:
                     tpe += ", with replacement"
         elif self.sampling_type == self.CrossValidation:
-            tpe = "Fold {} of {}-fold cross-validation".format(
-                self.selectedFold, self.number_of_folds)
-        else:
+            tpe = f"{self.number_of_folds}-fold cross-validation " \
+                  f"without subset #{self.selectedFold}"
+        elif self.sampling_type == self.Bootstrap:
+            tpe = "Bootstrap"
+        else:  # pragma: no cover
             tpe = "Undefined"  # should not come here at all
         if self.stratify:
             tpe += ", stratified (if possible)"
@@ -333,6 +339,12 @@ class OWDataSampler(OWWidget):
                 ("Remaining", "{} instances".format(self.remaining_instances)),
             ]
         self.report_items(items)
+
+    @classmethod
+    def migrate_settings(cls, settings, version):
+        if not version or version < 2 \
+                and settings["sampling_type"] == cls.CrossValidation:
+            settings["compatibility_mode"] = True
 
 
 class SampleFoldIndices(Reprable):
@@ -356,12 +368,12 @@ class SampleFoldIndices(Reprable):
     def __call__(self, table):
         if self.stratified and table.domain.has_discrete_class:
             splitter = skl.StratifiedKFold(
-                self.folds, random_state=self.random_state)
+                self.folds, shuffle=True, random_state=self.random_state)
             splitter.get_n_splits(table.X, table.Y)
             ind = splitter.split(table.X, table.Y)
         else:
             splitter = skl.KFold(
-                self.folds, random_state=self.random_state)
+                self.folds, shuffle=True, random_state=self.random_state)
             splitter.get_n_splits(table)
             ind = splitter.split(table)
         return tuple(ind)
@@ -377,13 +389,19 @@ class SampleRandomN(Reprable):
 
     def __call__(self, table):
         if self.replace:
+            # pylint: disable=no-member
             rgen = np.random.RandomState(self.random_state)
-            sample = rgen.random_integers(0, len(table) - 1, self.n)
+            sample = rgen.randint(0, len(table), self.n)
             o = np.ones(len(table))
             o[sample] = 0
             others = np.nonzero(o)[0]
             return others, sample
-        if self.stratified and table.domain.has_discrete_class:
+        if self.n == len(table):
+            rgen = np.random.RandomState(self.random_state)
+            sample = np.arange(self.n)
+            rgen.shuffle(sample)
+            return np.array([], dtype=int), sample
+        elif self.stratified and table.domain.has_discrete_class:
             test_size = max(len(table.domain.class_var.values), self.n)
             splitter = skl.StratifiedShuffleSplit(
                 n_splits=1, test_size=test_size,
@@ -424,10 +442,11 @@ class SampleBootstrap(Reprable):
         Returns:
             tuple (out_of_sample, sample) indices
         """
+        # pylint: disable=no-member
         rgen = np.random.RandomState(self.random_state)
         sample = rgen.randint(0, self.size, self.size)
         sample.sort()  # not needed for the code below, just for the user
-        insample = np.ones((self.size,), dtype=np.bool)
+        insample = np.ones((self.size,), dtype=bool)
         insample[sample] = False
         remaining = np.flatnonzero(insample)
         return remaining, sample

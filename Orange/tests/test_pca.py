@@ -1,21 +1,23 @@
 # Test methods with long descriptive names can omit docstrings
 # pylint: disable=missing-docstring
-
 import pickle
 import unittest
+from unittest.mock import MagicMock
 
 import numpy as np
 from sklearn import __version__ as sklearn_version
+from sklearn.utils import check_random_state
 
-from Orange.data import Table
+from Orange.data import Table, Domain
 from Orange.preprocess import Continuize, Normalize
-from Orange.projection import PCA, SparsePCA, IncrementalPCA, TruncatedSVD
+from Orange.projection import pca, PCA, SparsePCA, IncrementalPCA, TruncatedSVD
+from Orange.tests import test_filename
 
 
 class TestPCA(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ionosphere = Table('ionosphere')
+        cls.ionosphere = Table(test_filename('datasets/ionosphere.tab'))
         cls.iris = Table('iris')
         cls.zoo = Table('zoo')
 
@@ -64,6 +66,95 @@ class TestPCA(unittest.TestCase):
         proj = np.dot(data.X - pca_model.mean_, pca_model.components_.T)
         np.testing.assert_almost_equal(pca_model(data).X, proj)
 
+    def test_improved_randomized_pca_properly_called(self):
+        # It doesn't matter what we put into the matrix
+        x_ = np.random.normal(0, 1, (100, 20))
+        x = Table.from_numpy(Domain.from_numpy(x_), x_)
+
+        pca.randomized_pca = MagicMock(wraps=pca.randomized_pca)
+        PCA(10, svd_solver="randomized", random_state=42)(x)
+        pca.randomized_pca.assert_called_once()
+
+        pca.randomized_pca.reset_mock()
+        PCA(10, svd_solver="arpack", random_state=42)(x)
+        pca.randomized_pca.assert_not_called()
+
+    def test_improved_randomized_pca_dense_data(self):
+        """Randomized PCA should work well on dense data."""
+        random_state = check_random_state(42)
+
+        # Let's take a tall, skinny matrix
+        x_ = random_state.normal(0, 1, (100, 20))
+        x = Table.from_numpy(Domain.from_numpy(x_), x_)
+
+        pca = PCA(10, svd_solver="full", random_state=random_state)(x)
+        rpca = PCA(10, svd_solver="randomized", random_state=random_state)(x)
+
+        np.testing.assert_almost_equal(
+            pca.components_, rpca.components_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.explained_variance_, rpca.explained_variance_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.singular_values_, rpca.singular_values_, decimal=8
+        )
+
+        # And take a short, fat matrix
+        x_ = random_state.normal(0, 1, (20, 100))
+        x = Table.from_numpy(Domain.from_numpy(x_), x_)
+
+        pca = PCA(10, svd_solver="full", random_state=random_state)(x)
+        rpca = PCA(10, svd_solver="randomized", random_state=random_state)(x)
+
+        np.testing.assert_almost_equal(
+            pca.components_, rpca.components_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.explained_variance_, rpca.explained_variance_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.singular_values_, rpca.singular_values_, decimal=8
+        )
+
+    def test_improved_randomized_pca_sparse_data(self):
+        """Randomized PCA should work well on dense data."""
+        random_state = check_random_state(42)
+
+        # Let's take a tall, skinny matrix
+        x_ = random_state.negative_binomial(1, 0.5, (100, 20))
+        x = Table.from_numpy(Domain.from_numpy(x_), x_).to_sparse()
+
+        pca = PCA(10, svd_solver="full", random_state=random_state)(x.to_dense())
+        rpca = PCA(10, svd_solver="randomized", random_state=random_state)(x)
+
+        np.testing.assert_almost_equal(
+            pca.components_, rpca.components_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.explained_variance_, rpca.explained_variance_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.singular_values_, rpca.singular_values_, decimal=8
+        )
+
+        # And take a short, fat matrix
+        x_ = random_state.negative_binomial(1, 0.5, (20, 100))
+        x = Table.from_numpy(Domain.from_numpy(x_), x_).to_sparse()
+
+        pca = PCA(10, svd_solver="full", random_state=random_state)(x.to_dense())
+        rpca = PCA(10, svd_solver="randomized", random_state=random_state)(x)
+
+        np.testing.assert_almost_equal(
+            pca.components_, rpca.components_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.explained_variance_, rpca.explained_variance_, decimal=8
+        )
+        np.testing.assert_almost_equal(
+            pca.singular_values_, rpca.singular_values_, decimal=8
+        )
+
     @unittest.skipIf(sklearn_version.startswith('0.20'),
                      "https://github.com/scikit-learn/scikit-learn/issues/12234")
     def test_incremental_pca(self):
@@ -107,7 +198,7 @@ class TestPCA(unittest.TestCase):
         iris = self.iris
         pca = PCA(n_components=2)(iris)
         pca_iris = pca(iris)
-        pca_iris2 = Table(pca_iris.domain, iris)
+        pca_iris2 = iris.transform(pca_iris.domain)
         np.testing.assert_almost_equal(pca_iris.X, pca_iris2.X)
         np.testing.assert_equal(pca_iris.Y, pca_iris2.Y)
 
@@ -119,7 +210,7 @@ class TestPCA(unittest.TestCase):
         iris = self.iris
         pca = PCA(n_components=2)(iris)
         pca_iris = pca(iris)
-        pca_iris2 = Table(pca_iris.domain, iris)
+        pca_iris2 = iris.transform(pca_iris.domain)
 
         pca_iris2 = pickle.loads(pickle.dumps(pca_iris))
         self.assertIsNone(pca_iris2.domain[0].compute_value.transformed)
@@ -161,7 +252,7 @@ class TestPCA(unittest.TestCase):
 
     def test_max_components(self):
         d = np.random.RandomState(0).rand(20, 20)
-        data = Table(d)
+        data = Table.from_numpy(None, d)
         pca = PCA()(data)
         self.assertEqual(len(pca.explained_variance_ratio_), 20)
         pca = PCA(n_components=10)(data)

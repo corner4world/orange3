@@ -1,7 +1,6 @@
 # Test methods with long descriptive names can omit docstrings
 # pylint: disable=missing-docstring
 
-import os
 import pickle
 import unittest
 from unittest.mock import Mock
@@ -9,13 +8,12 @@ from unittest.mock import Mock
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from Orange.data import Table
+from Orange.data import Table, Domain, ContinuousVariable
 from Orange.preprocess import EntropyMDL, DoNotImpute, Default, Average, \
     SelectRandomFeatures, EqualFreq, RemoveNaNColumns, DropInstances, \
     EqualWidth, SelectBestFeatures, RemoveNaNRows, Preprocess, Scale, \
     Randomize, Continuize, Discretize, Impute, SklImpute, Normalize, \
-    ProjectCUR, ProjectPCA, RemoveConstant
-from Orange.util import OrangeDeprecationWarning
+    ProjectCUR, ProjectPCA, RemoveConstant, AdaptiveNormalize, RemoveSparse
 
 
 class TestPreprocess(unittest.TestCase):
@@ -46,19 +44,6 @@ class TestPreprocess(unittest.TestCase):
         MockPreprocessor.__init__.assert_called_with()
         self.assertEqual(MockPreprocessor.__call__.call_count, 0)
 
-    def test_refuse_data_in_constructor(self):
-        # We force deprecations as exceptions as part of CI
-        is_CI = os.environ.get('CI') or os.environ.get('ORANGE_DEPRECATIONS_ERROR')
-        if is_CI:
-            self.assertTrue(os.environ.get('ORANGE_DEPRECATIONS_ERROR'))
-        expected = self.assertRaises if is_CI else self.assertWarns
-        with expected(OrangeDeprecationWarning):
-            try:
-                Preprocess(Table('iris'))
-            except NotImplementedError:
-                # Expected from default Preprocess.__call__
-                pass
-
 
 class TestRemoveConstant(unittest.TestCase):
     def test_remove_columns(self):
@@ -67,7 +52,7 @@ class TestRemoveConstant(unittest.TestCase):
         X[3, 1] = np.nan
         X[1, 1] = np.nan
         X[:, 4] = np.nan
-        data = Table(X)
+        data = Table.from_numpy(None, X)
         d = RemoveConstant()(data)
         self.assertEqual(len(d.domain.attributes), 2)
 
@@ -84,7 +69,8 @@ class TestRemoveConstant(unittest.TestCase):
 class TestRemoveNaNRows(unittest.TestCase):
     def test_remove_row(self):
         data = Table("iris")
-        data.X[0, 0] = np.nan
+        with data.unlocked():
+            data.X[0, 0] = np.nan
         pp_data = RemoveNaNRows()(data)
         self.assertEqual(len(pp_data), len(data) - 1)
         self.assertFalse(np.isnan(pp_data.X).any())
@@ -93,21 +79,24 @@ class TestRemoveNaNRows(unittest.TestCase):
 class TestRemoveNaNColumns(unittest.TestCase):
     def test_column_filtering(self):
         data = Table("iris")
-        data.X[:, (1, 3)] = np.NaN
+        with data.unlocked():
+            data.X[:, (1, 3)] = np.NaN
 
         new_data = RemoveNaNColumns()(data)
         self.assertEqual(len(new_data.domain.attributes),
                          len(data.domain.attributes) - 2)
 
         data = Table("iris")
-        data.X[0, 0] = np.NaN
+        with data.unlocked():
+            data.X[0, 0] = np.NaN
         new_data = RemoveNaNColumns()(data)
         self.assertEqual(len(new_data.domain.attributes),
                          len(data.domain.attributes))
 
     def test_column_filtering_sparse(self):
         data = Table("iris")
-        data.X = csr_matrix(data.X)
+        with data.unlocked():
+            data.X = csr_matrix(data.X)
 
         new_data = RemoveNaNColumns()(data)
         self.assertEqual(data, new_data)
@@ -116,10 +105,10 @@ class TestRemoveNaNColumns(unittest.TestCase):
 class TestScaling(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.table = Table([[1, 2, 3],
-                           [2, 3, 4],
-                           [3, 4, 5],
-                           [4, 5, 6]])
+        cls.table = Table.from_numpy(None, [[1, 2, 3],
+                                            [2, 3, 4],
+                                            [3, 4, 5],
+                                            [4, 5, 6]])
 
     def test_scaling_mean_span(self):
         table = Scale(center=Scale.Mean, scale=Scale.Span)(self.table)
@@ -139,7 +128,7 @@ class TestReprs(unittest.TestCase):
                     Randomize, ProjectPCA, ProjectCUR, Scale,
                     EqualFreq, EqualWidth, EntropyMDL, SelectBestFeatures,
                     SelectRandomFeatures, RemoveNaNColumns, DoNotImpute, DropInstances,
-                    Average, Default]
+                    Average, Default, RemoveSparse]
 
         for preproc in preprocs:
             repr_str = repr(preproc())
@@ -166,3 +155,91 @@ class TestEnumPickling(unittest.TestCase):
         c1 = pickle.loads(s)
         self.assertIs(c1.center, c.center)
         self.assertIs(c1.scale, c.scale)
+
+
+class TestAdaptiveNormalize(unittest.TestCase):
+    """
+    Checks if output for sparse data is the same as for Scale
+    preprocessor. For dense data the output should match that
+     of Normalize preprocessor.
+    """
+
+    def setUp(self):
+        self.data = Table("iris")
+
+    def test_dense_pps(self):
+        true_out = Normalize()(self.data)
+        out = AdaptiveNormalize()(self.data)
+        np.testing.assert_array_equal(out, true_out)
+
+    def test_sparse_pps(self):
+        with self.data.unlocked():
+            self.data.X = csr_matrix(self.data.X)
+        out = AdaptiveNormalize()(self.data)
+        true_out = Scale(center=Scale.NoCentering, scale=Scale.Span)(self.data)
+        np.testing.assert_array_equal(out, true_out)
+        self.data = self.data.X.toarray()
+
+
+class TestRemoveSparse(unittest.TestCase):
+
+    def setUp(self):
+        domain = Domain([ContinuousVariable('a'), ContinuousVariable('b')])
+        self.data = Table.from_numpy(domain, np.zeros((3, 2)))
+
+    def test_0_dense(self):
+        with self.data.unlocked():
+            self.data[1:, 1] = 7
+            true_out = self.data[:, 1].copy()
+        with true_out.unlocked(true_out.X):
+            true_out.X = true_out.X.reshape(-1, 1)
+        out = RemoveSparse(0.5, True)(self.data)
+        np.testing.assert_array_equal(out, true_out)
+
+        out = RemoveSparse(2, True)(self.data)
+        np.testing.assert_array_equal(out, true_out)
+
+    def test_0_sparse(self):
+        with self.data.unlocked():
+            self.data[1:, 1] = 7
+            true_out = self.data[:, 1].copy()
+            self.data.X = csr_matrix(self.data.X)
+        with true_out.unlocked(true_out.X):
+            true_out.X = csr_matrix(true_out.X)
+        out = RemoveSparse(0.5, True)(self.data).X
+        np.testing.assert_array_equal(out, true_out)
+
+        out = RemoveSparse(1, True)(self.data).X
+        np.testing.assert_array_equal(out, true_out)
+
+    def test_nan_dense(self):
+        with self.data.unlocked():
+            self.data[1:, 1] = np.nan
+            self.data.X[:, 0] = 7
+            true_out = self.data[:, 0].copy()
+        with true_out.unlocked(true_out.X):
+            true_out.X = true_out.X.reshape(-1, 1)
+        out = RemoveSparse(0.5, False)(self.data)
+        np.testing.assert_array_equal(out, true_out)
+
+        out = RemoveSparse(1, False)(self.data)
+        np.testing.assert_array_equal(out, true_out)
+
+    def test_nan_sparse(self):
+        with self.data.unlocked():
+            self.data[1:, 1] = np.nan
+            self.data.X[:, 0] = 7
+            true_out = self.data[:, 0].copy()
+            with true_out.unlocked(true_out.X):
+                true_out.X = true_out.X.reshape(-1, 1)
+                true_out.X = csr_matrix(true_out.X)
+            self.data.X = csr_matrix(self.data.X)
+        out = RemoveSparse(0.5, False)(self.data)
+        np.testing.assert_array_equal(out, true_out)
+
+        out = RemoveSparse(1, False)(self.data)
+        np.testing.assert_array_equal(out, true_out)
+
+
+if __name__ == '__main__':
+    unittest.main()

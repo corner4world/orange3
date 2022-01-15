@@ -1,5 +1,6 @@
 # Test methods with long descriptive names can omit docstrings
 # pylint: disable=missing-docstring
+from Orange.data import Table
 from Orange.widgets.model.owrandomforest import OWRandomForest
 from Orange.widgets.tests.base import (
     WidgetTest,
@@ -26,11 +27,9 @@ class TestOWRandomForest(WidgetTest, WidgetLearnerTestMixin):
         when all properties are checked
         """
         self.widget.max_features_spin[0].setCheckState(True)
-        self.widget.random_state_spin[0].setCheckState(True)
         self.widget.max_depth_spin[0].setCheckState(True)
         self.parameters.extend([
             ParameterMapping("max_features", self.widget.max_features_spin[1]),
-            ParameterMapping("random_state", self.widget.random_state_spin[1]),
             ParameterMapping("max_depth", self.widget.max_depth_spin[1])])
         self.test_parameters()
 
@@ -46,3 +45,13 @@ class TestOWRandomForest(WidgetTest, WidgetLearnerTestMixin):
             DefaultParameterMapping("max_depth", None),
             DefaultParameterMapping("min_samples_split", 2)])
         self.test_parameters()
+
+    def test_class_weights(self):
+        table = Table("iris")
+        self.send_signal("Data", table)
+        self.assertFalse(self.widget.class_weight)
+        self.widget.controls.class_weight.setChecked(True)
+        self.assertTrue(self.widget.class_weight)
+        self.widget.apply_button.button.click()
+        self.assertEqual(self.widget.model.skl_model.class_weight, "balanced")
+        self.assertTrue(self.widget.Warning.class_weights_used.is_shown())

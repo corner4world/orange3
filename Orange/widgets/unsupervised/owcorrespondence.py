@@ -1,21 +1,25 @@
+import warnings
 from collections import namedtuple, OrderedDict
 
 import numpy as np
 
-from AnyQt.QtWidgets import QListView, QApplication
+from AnyQt.QtWidgets import QListView, QApplication, QSizePolicy
 from AnyQt.QtGui import QBrush, QColor, QPainter
-from AnyQt.QtCore import QEvent, QItemSelectionModel, QItemSelection
+from AnyQt.QtCore import QEvent, Qt
+from orangewidget.utils.listview import ListViewSearch
 
 import pyqtgraph as pg
-import Orange.data
+from Orange.data import Table, Domain, ContinuousVariable, StringVariable
 from Orange.statistics import contingency
 
 from Orange.widgets import widget, gui, settings
-from Orange.widgets.utils import itemmodels, colorpalette
+from Orange.widgets.utils import itemmodels, colorpalettes
+from Orange.widgets.utils.itemmodels import select_rows
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 from Orange.widgets.visualize.owscatterplotgraph import ScatterPlotItem
-from Orange.widgets.widget import Input
+from Orange.widgets.widget import Input, Output
+from Orange.widgets.settings import Setting
 
 
 class ScatterPlotItem(pg.ScatterPlotItem):
@@ -25,23 +29,6 @@ class ScatterPlotItem(pg.ScatterPlotItem):
         super().paint(painter, option, widget)
 
 
-def select_rows(view, row_indices, command=QItemSelectionModel.ClearAndSelect):
-    """
-    Select rows in view.
-
-    :param QAbstractItemView view:
-    :param row_indices: Integer indices of rows to select.
-    :param command: QItemSelectionModel.SelectionFlags
-    """
-    selmodel = view.selectionModel()
-    model = view.model()
-    selection = QItemSelection()
-    for row in row_indices:
-        index = model.index(row, 0)
-        selection.select(index, index)
-    selmodel.select(selection, command | QItemSelectionModel.Rows)
-
-
 class OWCorrespondenceAnalysis(widget.OWWidget):
     name = "Correspondence Analysis"
     description = "Correspondence analysis for categorical multivariate data."
@@ -49,13 +36,17 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
     keywords = []
 
     class Inputs:
-        data = Input("Data", Orange.data.Table)
+        data = Input("Data", Table)
+
+    class Outputs:
+        coordinates = Output("Coordinates", Table)
 
     Invalidate = QEvent.registerEventType()
 
     settingsHandler = settings.DomainContextHandler()
 
     selected_var_indices = settings.ContextSetting([])
+    auto_commit = Setting(True)
 
     graph_name = "plot.plotItem"
 
@@ -72,7 +63,7 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
 
         box = gui.vBox(self.controlArea, "Variables")
         self.varlist = itemmodels.VariableListModel()
-        self.varview = view = QListView(
+        self.varview = view = ListViewSearch(
             selectionMode=QListView.MultiSelection,
             uniformItemSizes=True
         )
@@ -82,21 +73,25 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
         box.layout().addWidget(view)
 
         axes_box = gui.vBox(self.controlArea, "Axes")
-        box = gui.vBox(axes_box, "Axis X", margin=0)
-        box.setFlat(True)
         self.axis_x_cb = gui.comboBox(
-            box, self, "component_x", callback=self._component_changed)
+            axes_box, self, "component_x", label="X:",
+            callback=self._component_changed, orientation=Qt.Horizontal,
+            sizePolicy=(QSizePolicy.MinimumExpanding,
+                        QSizePolicy.Preferred)
+        )
 
-        box = gui.vBox(axes_box, "Axis Y", margin=0)
-        box.setFlat(True)
         self.axis_y_cb = gui.comboBox(
-            box, self, "component_y", callback=self._component_changed)
+            axes_box, self, "component_y", label="Y:",
+            callback=self._component_changed, orientation=Qt.Horizontal,
+            sizePolicy=(QSizePolicy.MinimumExpanding,
+                        QSizePolicy.Preferred)
+        )
 
         self.infotext = gui.widgetLabel(
             gui.vBox(self.controlArea, "Contribution to Inertia"), "\n"
         )
 
-        gui.rubber(self.controlArea)
+        gui.auto_send(self.buttonsArea, self, "auto_commit")
 
         self.plot = pg.PlotWidget(background="w")
         self.plot.setMenuEnabled(False)
@@ -121,11 +116,40 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
                 self.data = None
             else:
                 self.selected_var_indices = [0, 1][:len(self.varlist)]
-                self.component_x = 0
-                self.component_y = int(len(self.varlist[self.selected_var_indices[-1]].values) > 1)
+                # This widget's update flow is broken in many ways, starting
+                # from using context domain handler without having any valid
+                # context settings. Getting rid of these warnings would require
+                # rewriting large portins; @ales-erjavec is doing it and will
+                # finish it eventually, so let us these warnings are
+                # uninformative and would better be silenced.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore", "combo box 'component_[xy]' .*", UserWarning)
+                    self.component_x = 0
+                    self.component_y = int(len(self.varlist[self.selected_var_indices[-1]].values) > 1)
                 self.openContext(data)
                 self._restore_selection()
         self._update_CA()
+        self.commit.now()
+
+    @gui.deferred
+    def commit(self):
+        output_table = None
+        if self.ca is not None:
+            sel_vars = self.selected_vars()
+            if len(sel_vars) == 2:
+                rf = np.vstack((self.ca.row_factors, self.ca.col_factors))
+            else:
+                rf = self.ca.row_factors
+            vars_data = [(val.name, var) for val in sel_vars for var in val.values]
+            output_table = Table(
+                Domain([ContinuousVariable(f"Component {i + 1}")
+                        for i in range(rf.shape[1])],
+                       metas=[StringVariable("Variable"),
+                              StringVariable("Value")]),
+                rf, metas=vars_data
+            )
+        self.Outputs.coordinates.send(output_table)
 
     def clear(self):
         self.data = None
@@ -145,8 +169,7 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
         restore(self.varview, self.selected_var_indices)
 
     def _p_axes(self):
-#         return (0, 1)
-        return (self.component_x, self.component_y)
+        return self.component_x, self.component_y
 
     def _var_changed(self):
         self.selected_var_indices = sorted(
@@ -173,12 +196,18 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
             self.ca = None
             self.plot.clear()
             self._update_CA()
+            self.commit.deferred()
             return
         return super().customEvent(event)
 
     def _update_CA(self):
         self.update_XY()
-        self.component_x, self.component_y = self.component_x, self.component_y
+        # See the comment about catch_warnings above.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", "combo box 'component_[xy]' .*", UserWarning)
+            self.component_x, self.component_y = \
+                self.component_x, self.component_y
 
         self._setup_plot()
         self._update_info()
@@ -221,7 +250,7 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
         self.plot.clear()
         points = self.ca
         variables = self.selected_vars()
-        colors = colorpalette.ColorPaletteGenerator(len(variables))
+        colors = colorpalettes.LimitedDiscretePalette(len(variables))
 
         p_axes = self._p_axes()
 
@@ -365,7 +394,8 @@ def correspondence(A):
     row_sum = np.sum(corr_mat, axis=1, keepdims=True)
     E = row_sum * col_sum
 
-    D_r, D_c = row_sum.ravel() ** -1, col_sum.ravel() ** -1
+    with np.errstate(divide="ignore"):
+        D_r, D_c = row_sum.ravel() ** -1, col_sum.ravel() ** -1
     D_r, D_c = np.nan_to_num(D_r), np.nan_to_num(D_c)
 
     def gsvd(M, wu, wv):
@@ -405,4 +435,4 @@ class CA(CA):
 
 
 if __name__ == "__main__":  # pragma: no cover
-    WidgetPreview(OWCorrespondenceAnalysis).run(Orange.data.Table("smokers_ct"))
+    WidgetPreview(OWCorrespondenceAnalysis).run(Table("titanic"))
